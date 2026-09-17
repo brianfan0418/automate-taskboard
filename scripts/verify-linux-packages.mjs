@@ -14,8 +14,8 @@ if (process.platform !== "linux") {
   throw new Error("Linux packages must be verified on Linux");
 }
 const productName = process.env.CODEX_TASKBOARD_RELEASE_VERSION?.includes("-beta.")
-  ? "Codex Taskboard Beta"
-  : "Codex Taskboard";
+  ? "AutoMate Taskboard Beta"
+  : "AutoMate Taskboard";
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -58,20 +58,20 @@ async function assertElfX64(filePath) {
 }
 
 async function verifyPackageRoot(root, label) {
-  const launcherPath = path.join(root, "usr", "bin", "codex-taskboard-launcher");
-  const nodePath = path.join(root, "usr", "bin", "codex-taskboard-node");
+  const launcherPath = path.join(root, "usr", "bin", "automate-taskboard-launcher");
+  const nodePath = path.join(root, "usr", "bin", "automate-taskboard-node");
   const resourceRoot = path.join(root, "usr", "lib", productName);
   const taskctlPath = path.join(resourceRoot, "bin", "taskctl");
   const requiredResources = [
     "app/cli/taskctl.mjs",
     "app/dist/web/index.html",
-    "app/inject/codex-taskboard.user.js",
+    "app/inject/automate-taskboard.user.js",
     "app/node_modules/smol-toml/package.json",
     "app/scripts/codex-injector.mjs",
     "app/server/app.mjs",
     "app/server/index.mjs",
     "app/shared/codex-executable.mjs",
-    "app/skills/manage-taskboard/SKILL.md",
+    "app/skills/manage-automate-taskboard/SKILL.md",
   ];
 
   await assertExecutable(launcherPath);
@@ -86,7 +86,7 @@ async function verifyPackageRoot(root, label) {
 
   const wrapper = await readFile(taskctlPath, "utf8");
   if (
-    !wrapper.includes("codex-taskboard-node")
+    !wrapper.includes("automate-taskboard-node")
     || !wrapper.includes("app/cli/taskctl.mjs")
   ) {
     throw new Error(`${label} taskctl does not use the packaged Node and CLI`);
@@ -97,7 +97,7 @@ async function verifyPackageRoot(root, label) {
   }
 }
 
-const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "codex-taskboard-linux-packages."));
+const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "automate-taskboard-linux-packages."));
 try {
   if (run("dpkg-deb", ["--field", debPath, "Architecture"]) !== "amd64") {
     throw new Error("Debian package architecture is not amd64");

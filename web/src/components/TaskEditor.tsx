@@ -19,6 +19,7 @@ import {
   type TaskStatus,
 } from "../types";
 import {
+  CLAUDE_AGENT_ACTOR,
   CODEX_AGENT_ACTOR,
   actorKey,
   assigneeTargetForActor,
@@ -52,6 +53,12 @@ import { TaskPropertyPicker } from "./TaskPropertyPicker";
 import { TaskboardIcon } from "./TaskboardIcon";
 
 const RECURRENCE_UNITS: Record<TaskboardLanguage, Record<Recurrence["unit"], string>> = {
+  "zh-TW": {
+    day: "天",
+    week: "週",
+    month: "月",
+    year: "年",
+  },
   zh: {
     day: "天",
     week: "周",
@@ -66,7 +73,7 @@ const RECURRENCE_UNITS: Record<TaskboardLanguage, Record<Recurrence["unit"], str
   },
 };
 
-type TaskEditorError = string | readonly [string, string];
+type TaskEditorError = string | readonly [string, string, string?];
 type DraftRelationMenu = "parent" | "related" | "subIssue";
 
 export interface NewTaskRelationDraft {
@@ -145,7 +152,7 @@ function contextValue(context: DevelopmentContext | null): string {
 
 function contextLabel(
   context: DevelopmentContext,
-  text: (chinese: string, english: string) => string,
+  text: (chinese: string, english: string, taiwanese?: string) => string,
 ): string {
   if (context.type === "branch") return context.branch;
   const folder = context.path.split(/[\\/]/).filter(Boolean).at(-1) ?? context.path;
@@ -262,7 +269,7 @@ export function TaskEditor({
         : subIssueIds,
   );
 
-  const assigneeOptions = [currentUser, CODEX_AGENT_ACTOR]
+  const assigneeOptions = [currentUser, CODEX_AGENT_ACTOR, CLAUDE_AGENT_ACTOR]
     .filter((actor, index, actors) => (
       actors.findIndex((candidate) => actorKey(candidate) === actorKey(actor)) === index
     ));
@@ -698,9 +705,9 @@ export function TaskEditor({
                   <button type="button" onClick={() => setMenu("due")}><span><DueDateIcon color="currentColor" /></span><strong>{text("设置截止日期", "Set due date")}</strong><kbd>⇧ D</kbd><b><LinearIcon name="chevronRight" /></b></button>
                   <button type="button" onClick={() => setMenu("recurrence")}><span><RecurrenceIcon color="currentColor" /></span><strong>{text("设置重复…", "Set recurrence…")}</strong><b><LinearIcon name="chevronRight" /></b></button>
                   <div className="more-popover-divider" />
-                  <button className={relationMenu === "subIssue" ? "is-open" : undefined} type="button" role="menuitem" aria-haspopup="menu" aria-expanded={relationMenu === "subIssue"} onClick={() => setRelationMenu("subIssue")}><span><PlusIcon color="currentColor" size={16} /></span><strong>{text("添加子议题", "Add sub-issue")}</strong>{selectedSubIssues.length > 0 && <small>{text(`${selectedSubIssues.length} 个已选`, `${selectedSubIssues.length} selected`)}</small>}<b><LinearIcon name="chevronRight" /></b></button>
+                  <button className={relationMenu === "subIssue" ? "is-open" : undefined} type="button" role="menuitem" aria-haspopup="menu" aria-expanded={relationMenu === "subIssue"} onClick={() => setRelationMenu("subIssue")}><span><PlusIcon color="currentColor" size={16} /></span><strong>{text("添加子议题", "Add sub-issue")}</strong>{selectedSubIssues.length > 0 && <small>{text(`${selectedSubIssues.length} 个已选`, `${selectedSubIssues.length} selected`, `已選 ${selectedSubIssues.length} 個`)}</small>}<b><LinearIcon name="chevronRight" /></b></button>
                   <button className={relationMenu === "parent" ? "is-open" : undefined} type="button" role="menuitem" aria-haspopup="menu" aria-expanded={relationMenu === "parent"} onClick={() => setRelationMenu("parent")}><span><PlusIcon color="currentColor" size={16} /></span><strong>{text("添加父议题", "Add parent issue")}</strong>{selectedParent && <small>{selectedParent.externalKey ?? selectedParent.identifier}</small>}<b><LinearIcon name="chevronRight" /></b></button>
-                  <button className={relationMenu === "related" ? "is-open" : undefined} type="button" role="menuitem" aria-haspopup="menu" aria-expanded={relationMenu === "related"} onClick={() => setRelationMenu("related")}><span><RelationIcon color="currentColor" size={16} /></span><strong>{text("添加关联议题", "Add related issue")}</strong>{selectedRelated.length > 0 && <small>{text(`${selectedRelated.length} 个已选`, `${selectedRelated.length} selected`)}</small>}<b><LinearIcon name="chevronRight" /></b></button>
+                  <button className={relationMenu === "related" ? "is-open" : undefined} type="button" role="menuitem" aria-haspopup="menu" aria-expanded={relationMenu === "related"} onClick={() => setRelationMenu("related")}><span><RelationIcon color="currentColor" size={16} /></span><strong>{text("添加关联议题", "Add related issue")}</strong>{selectedRelated.length > 0 && <small>{text(`${selectedRelated.length} 个已选`, `${selectedRelated.length} selected`, `已選 ${selectedRelated.length} 個`)}</small>}<b><LinearIcon name="chevronRight" /></b></button>
                   {relationMenu && (
                     <div className="issue-relation-popover task-create-relation-submenu" aria-label={text("选择关系议题", "Select relation issue")}>
                       <IssuePickerContent
@@ -738,12 +745,12 @@ export function TaskEditor({
             <div className="form-error" role="alert">
               {typeof attachmentError === "string"
                 ? attachmentError
-                : text(attachmentError[0], attachmentError[1])}
+                : text(attachmentError[0], attachmentError[1], attachmentError[2])}
             </div>
           )}
           {error && (
             <div className="form-error" role="alert">
-              {typeof error === "string" ? error : text(error[0], error[1])}
+              {typeof error === "string" ? error : text(error[0], error[1], error[2])}
             </div>
           )}
 

@@ -12,7 +12,7 @@ export const TASK_PRIORITIES = ["none", "urgent", "high", "medium", "low"] as co
 export type TaskStatus = (typeof TASK_STATUSES)[number];
 export type TaskPriority = (typeof TASK_PRIORITIES)[number];
 export type ActorType = "user" | "agent";
-export type AssigneeTarget = "current-user" | "codex-agent";
+export type AssigneeTarget = "current-user" | "codex-agent" | "claude-agent";
 export type IssueRelationType = "parent" | "blocks" | "blocked_by" | "related";
 export type IssueRelationOrigin = "manual" | "mention";
 
@@ -257,7 +257,11 @@ export interface ComposerTurnInput {
   document: ComposerDocument;
   dangerFullAccessConfirmed?: boolean;
   attachments?: AiChatAttachmentInput[];
+  intent?: ComposerTurnIntent;
 }
+
+/** Import fix F2: the server selects the board skill for a task-status import turn. */
+export type ComposerTurnIntent = "taskboard-import";
 
 export interface AiChatCatalog {
   models: AiChatModel[];
@@ -441,9 +445,122 @@ export interface Task {
   externalUrl: string | null;
   archivedAt: string | null;
   relations: TaskRelations;
+  activeRun?: TaskRun | null;
+  latestRun?: TaskRun | null;
   version: number;
   createdAt: string;
   updatedAt: string;
+}
+
+export type TaskRunProvider = "codex" | "claude";
+export type TaskRunStatus =
+  | "starting"
+  | "running"
+  | "stopping"
+  | "finished"
+  | "stopped"
+  | "failed"
+  | "interrupted";
+export type TaskRunStopDestination = "backlog" | "todo" | "canceled";
+
+export interface TaskRun {
+  id: string;
+  taskId: string;
+  provider: TaskRunProvider;
+  status: TaskRunStatus;
+  claudeShortId: string | null;
+  claudeSessionId: string | null;
+  claudeBridgeSessionId: string | null;
+  codexThreadId: string | null;
+  codexTurnId: string | null;
+  resultText: string | null;
+  error: string | null;
+  startedAt: string | null;
+  endedAt: string | null;
+  /** CONTRACTS Amendment 6: the mode a Claude run started with (null: unknown / Claude's built-in default). */
+  claudePermissionMode?: ClaudeSettingsPermissionMode | null;
+  /** CONTRACTS Amendment 6: where that mode came from (null for Codex runs and older runs). */
+  claudePermissionSource?: TaskRunClaudePermissionSource | null;
+  /** CONTRACTS Amendment 9: token in the Claude session name (`… · r<token>`), saved before `claude --bg`. */
+  claudeLaunchToken?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Claude Code `permissions.defaultMode` values (`manual` is reported as `default`). */
+export type ClaudeSettingsPermissionMode = "default" | "acceptEdits" | "plan" | "auto" | "dontAsk" | "bypassPermissions";
+export type ClaudeSettingsScope = "managed" | "projectLocal" | "project" | "user";
+/** `board` = the project's explicit choice; `fallback` = followClaude found no Claude setting. */
+export type TaskRunClaudePermissionSource = "board" | "fallback" | ClaudeSettingsScope;
+
+export interface TaskRunWithOpenUrl extends TaskRun {
+  openUrl: string | null;
+}
+
+export type TaskFollowupMode = "queue" | "steer";
+export type TaskFollowupStatus = "pending" | "sent" | "failed" | "canceled";
+
+export interface TaskFollowup {
+  id: string;
+  taskId: string;
+  runId: string | null;
+  body: string;
+  mode: TaskFollowupMode;
+  status: TaskFollowupStatus;
+  error: string | null;
+  createdAt: string;
+  sentAt: string | null;
+}
+
+export type ProjectOrderMode = "suggested" | "manual";
+
+export interface ProjectAutomation {
+  projectId: string;
+  enabled: boolean;
+  maxParallel: number;
+  claudeModel: string | null;
+  codexModel: string | null;
+  codexEffort: string | null;
+  orderMode: ProjectOrderMode;
+  /** CONTRACTS Amendments 5 / 6: how board-started Claude sessions handle tool permissions. */
+  claudePermissionMode: ClaudePermissionMode;
+  updatedAt: string;
+}
+
+export type ClaudePermissionMode = "followClaude" | "acceptEdits" | "bypassPermissions";
+
+/** CONTRACTS Amendment 6: what Claude Code's own settings select for the project folder (GET automation). */
+export interface ClaudePermissionPreview {
+  /** null with a source: Claude's built-in default applies (a project `auto`). */
+  claudeEffectivePermissionMode: ClaudeSettingsPermissionMode | null;
+  /** null: no settings file sets `permissions.defaultMode`, so followClaude passes bypassPermissions. */
+  claudePermissionSource: {
+    scope: ClaudeSettingsScope;
+    path: string | null;
+    configuredMode: string | null;
+  } | null;
+}
+
+export interface ProjectAutomationDetails {
+  automation: ProjectAutomation;
+  /** Absent when the server predates Amendment 6. */
+  claudePermission: ClaudePermissionPreview | null;
+}
+
+export type ProjectAutomationPatch = Partial<Pick<
+  ProjectAutomation,
+  "enabled" | "maxParallel" | "claudeModel" | "codexModel" | "codexEffort" | "orderMode" | "claudePermissionMode"
+>>;
+
+export interface ProviderStatus {
+  ok: boolean;
+  reason?: string;
+  version?: string;
+}
+
+export interface ProviderStatuses {
+  claude: ProviderStatus;
+  codex: ProviderStatus;
 }
 
 export interface JiraConnection {

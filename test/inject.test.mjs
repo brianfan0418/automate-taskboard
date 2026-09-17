@@ -5,7 +5,7 @@ import vm from "node:vm";
 
 import { parseTaskboardAutomationHostRequest } from "../shared/taskboard-automation.mjs";
 
-const sourceUrl = new URL("../inject/codex-taskboard.user.js", import.meta.url);
+const sourceUrl = new URL("../inject/automate-taskboard.user.js", import.meta.url);
 const source = (await readFile(sourceUrl, "utf8")).replaceAll("\r\n", "\n");
 const webStyles = await readFile(new URL("../web/src/styles.css", import.meta.url), "utf8");
 const webApp = await readFile(new URL("../web/src/App.tsx", import.meta.url), "utf8");
@@ -14,8 +14,8 @@ const embeddedHost = await readFile(new URL("../web/src/embeddedHost.mjs", impor
 test("injection is an idempotent IIFE guarded by its current source hash", () => {
   assert.match(source, /^\(\(\) => \{/);
   assert.match(source, /const VERSION = "0\.6\.13"/);
-  assert.match(source, /const SOURCE_HASH = window\.__CODEX_TASKBOARD_SOURCE_HASH__/);
-  assert.match(source, /const SENTINEL_KEY = "__codexTaskboardInjection__"/);
+  assert.match(source, /const SOURCE_HASH = window\.__AUTOMATE_TASKBOARD_SOURCE_HASH__/);
+  assert.match(source, /const SENTINEL_KEY = "__automateTaskboardInjection__"/);
   assert.match(source, /previous\?\.sourceHash === SOURCE_HASH/);
   assert.match(source, /previous\.refresh\(\);\s*return;/);
   assert.match(source, /sourceHash: SOURCE_HASH/);
@@ -23,8 +23,8 @@ test("injection is an idempotent IIFE guarded by its current source hash", () =>
 });
 
 test("embedded page uses the launcher URL inside an opaque sandbox", () => {
-  assert.match(source, /http:\/\/127\.0\.0\.1:47823\/\?host=codex/);
-  assert.match(source, /window\.__CODEX_TASKBOARD_URL__/);
+  assert.match(source, /http:\/\/127\.0\.0\.1:47833\/\?host=codex/);
+  assert.match(source, /window\.__AUTOMATE_TASKBOARD_URL__/);
   assert.match(source, /nextFrame\.name = frameName/);
   assert.match(source, /nextFrame\.src = "about:blank"/);
   assert.match(source, /requestHost\("load-frame", \{ frameName, frameCapability: capability \}\)/);
@@ -46,11 +46,11 @@ test("entry clones the native Plugins row and the page covers the complete Codex
   assert.match(source, /const surface = viewport\?\.parentElement/);
   assert.match(source, /surface\.appendChild\(page\)/);
   assert.match(source, /#\$\{PAGE_ID\} \{[\s\S]*?top: 0;/);
-  assert.doesNotMatch(source, /--codex-taskboard-top-offset/);
+  assert.doesNotMatch(source, /--automate-taskboard-top-offset/);
   assert.match(source, /child\.setAttribute\(HIDDEN_ATTRIBUTE, "true"\)/);
   assert.match(source, /page\.hidden = false/);
-  assert.doesNotMatch(source, /codex-taskboard-overlay/);
-  assert.doesNotMatch(source, /codex-taskboard-toolbar/);
+  assert.doesNotMatch(source, /automate-taskboard-overlay/);
+  assert.doesNotMatch(source, /automate-taskboard-toolbar/);
   assert.doesNotMatch(source, /aria-modal/);
 });
 
@@ -71,7 +71,7 @@ test("entry recognizes known Plugins labels and structurally anchors an unenumer
   };
   const findReferenceButton = vm.runInNewContext(`(() => {
     const PLUGIN_LABELS = ["插件", "plugins", "外掛程式", "プラグイン"];
-    const OWNED_ATTRIBUTE = "data-codex-taskboard-owned";
+    const OWNED_ATTRIBUTE = "data-automate-taskboard-owned";
     ${normalizedLabelSource}
     ${referenceSource}
     return findReferenceButton;
@@ -92,7 +92,7 @@ test("entry recognizes known Plugins labels and structurally anchors an unenumer
 
   const topButton = (textContent, top, owned = false) => ({
     textContent,
-    getAttribute: (name) => name === "data-codex-taskboard-owned" && owned ? "true" : null,
+    getAttribute: (name) => name === "data-automate-taskboard-owned" && owned ? "true" : null,
     getBoundingClientRect: () => ({ top, bottom: top + 30, height: 30 }),
     parentElement: {},
   });
@@ -122,11 +122,11 @@ test("entry recognizes known Plugins labels and structurally anchors an unenumer
 
   for (const language of ["zh", "zh-CN", "zh-TW", "zh-HK"]) {
     languageDocument.documentElement.lang = language;
-    assert.equal(hostText("任务面板", "Taskboard"), "任务面板");
+    assert.equal(hostText("任務面板", "Taskboard"), "任務面板");
   }
   for (const language of ["en-US", "ja-JP", "de-DE"]) {
     languageDocument.documentElement.lang = language;
-    assert.equal(hostText("任务面板", "Taskboard"), "Taskboard");
+    assert.equal(hostText("任務面板", "Taskboard"), "Taskboard");
   }
 });
 
@@ -146,18 +146,18 @@ test("the embedded header fills the native titlebar without clipping or a full-p
   assert.doesNotMatch(source, /headerRightInset/);
   assert.doesNotMatch(source, /NATIVE_HEADER_RIGHT_INSET/);
   assert.doesNotMatch(source, /clip-path: polygon/);
-  assert.doesNotMatch(source, /codex-taskboard-titlebar-fill/);
+  assert.doesNotMatch(source, /automate-taskboard-titlebar-fill/);
   assert.doesNotMatch(source, /#\$\{PAGE_ID\} \{[^}]*-webkit-app-region: no-drag !important;/);
   assert.doesNotMatch(source, /#\$\{FRAME_ID\} \{[^}]*-webkit-app-region: no-drag !important;/);
-  assert.match(source, /const NO_DRAG_LEFT_ID = "codex-taskboard-no-drag-left"/);
-  assert.match(source, /const NO_DRAG_RIGHT_ID = "codex-taskboard-no-drag-right"/);
+  assert.match(source, /const NO_DRAG_LEFT_ID = "automate-taskboard-no-drag-left"/);
+  assert.match(source, /const NO_DRAG_RIGHT_ID = "automate-taskboard-no-drag-right"/);
   assert.match(source, /window\.addEventListener\("resize", scheduleRefresh\)/);
 });
 
 test("only the empty embedded header spacer is draggable", () => {
   assert.match(webApp, /<div ref=\{dragRegionRef\} className="workspace-drag-region" aria-hidden="true" \/>/);
   assert.match(webApp, /type: "taskboard:drag-region"/);
-  assert.match(source, /const DRAG_REGION_ID = "codex-taskboard-drag-region"/);
+  assert.match(source, /const DRAG_REGION_ID = "automate-taskboard-drag-region"/);
   assert.match(source, /message\.type === "taskboard:drag-region"/);
   assert.match(source, /function updateDragRegion\(payload\)/);
   assert.match(source, /#\$\{DRAG_REGION_ID\} \{[\s\S]*?-webkit-app-region: drag;/);
@@ -192,11 +192,11 @@ test("the embedded header exposes Codex's native sidebar expansion when collapse
   assert.match(webApp, /type: "taskboard:expand-sidebar"/);
   assert.match(webApp, /className="detail-back-button codex-sidebar-expand-button"/);
   assert.match(webApp, /<LinearIcon name="codexSidebarExpand" \/>/);
-  assert.match(webStyles, /\.codex-sidebar-expand-button \{[\s\S]*?width: 28px;[\s\S]*?height: 28px;/);
+  assert.match(webStyles, /\.codex-sidebar-expand-button \{[\s\S]*?width: 1\.75rem;[\s\S]*?height: 1\.75rem;/);
 });
 
 test("opening asks the resident launcher to ensure the service and rebuilds failed frames", () => {
-  assert.match(source, /const HOST_REQUEST_MESSAGE = "__codexTaskboardHostRequestV1"/);
+  assert.match(source, /const HOST_REQUEST_MESSAGE = "__automateTaskboardHostRequestV1"/);
   assert.match(source, /return requestHost\("ensure"\)/);
   assert.match(source, /result\.restarted/);
   assert.match(source, /loadTaskboardFrame\(\)/);
@@ -207,7 +207,7 @@ test("opening asks the resident launcher to ensure the service and rebuilds fail
 });
 
 test("the injected iframe can be cache-busted without reloading the Codex shell", () => {
-  assert.match(source, /const FRAME_REFRESH_PARAM = "__codex_taskboard_refresh"/);
+  assert.match(source, /const FRAME_REFRESH_PARAM = "__automate_taskboard_refresh"/);
   assert.match(source, /function reloadFrame\(\)/);
   assert.match(source, /loadTaskboardFrame\(true\)/);
   assert.match(source, /reloadFrame,/);
@@ -298,7 +298,7 @@ test("complete App automation payloads cross the injected forwarder into the cur
     projectName: "Local",
     workspacePath: "/tmp/local-project",
     remoteProjects: [],
-    skillPath: "/tmp/manage-taskboard/SKILL.md",
+    skillPath: "/tmp/manage-automate-taskboard/SKILL.md",
     automationId: "automation-1",
     enabledByUser: true,
     quotaAware: true,
@@ -932,7 +932,7 @@ test("cleanup removes observers, listeners, timers and owned DOM", () => {
   assert.match(source, /document\.removeEventListener\("click", onDocumentClick, true\)/);
   assert.match(source, /window\.removeEventListener\("popstate", onNativeRouteChange\)/);
   assert.match(source, /window\.clearTimeout\(reattachTimer\)/);
-  assert.match(source, /data-codex-taskboard-owned/);
+  assert.match(source, /data-automate-taskboard-owned/);
   assert.match(source, /delete window\[SENTINEL_KEY\]/);
 });
 

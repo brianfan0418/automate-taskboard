@@ -1,4 +1,4 @@
-import type { DragEvent } from "react";
+import { useState, type DragEvent } from "react";
 import { useTaskCardDragPreview } from "../useTaskCardDragPreview";
 import type { ActorIdentity, Task, TaskDraft, TaskStatus } from "../types";
 import { taskStatusLabel, useTaskboardI18n } from "../i18n";
@@ -48,6 +48,13 @@ interface BoardColumnProps {
   onDragEnter: (status: TaskStatus) => void;
   onDrop: (status: TaskStatus, taskId: string, beforeTaskId: string | null) => void;
   onOpenConversation: (conversation: TaskConversationItem) => void;
+  // v2 run controls forwarded to TaskCard (optional).
+  onStartRun?: (task: Task) => void | Promise<void>;
+  onStopRun?: (task: Task) => void | Promise<void>;
+  onOpenRunInApp?: (task: Task) => void | Promise<void>;
+  // v2 ordering: the todo column shows 「恢復建議排序」 while the project order mode is manual.
+  orderMode?: "suggested" | "manual" | null;
+  onResetOrder?: () => void | Promise<void>;
 }
 
 export function BoardColumn({
@@ -79,8 +86,15 @@ export function BoardColumn({
   onDragEnter,
   onDrop,
   onOpenConversation,
+  onStartRun,
+  onStopRun,
+  onOpenRunInApp,
+  orderMode = null,
+  onResetOrder,
 }: BoardColumnProps) {
   const { language, text } = useTaskboardI18n();
+  const [resettingOrder, setResettingOrder] = useState(false);
+  const showResetOrder = status === "todo" && orderMode === "manual" && Boolean(onResetOrder);
   const details = STATUS_DETAILS[status];
   const label = taskStatusLabel(language, status);
   const { findDropBefore, clearDropPreview, updateDropPreview, leaveDropPreview, getTaskDragShift } =
@@ -116,17 +130,35 @@ export function BoardColumn({
             {label}{tasks.length > 0 ? ` ${tasks.length}` : ""}
           </h2>
         </div>
-        {createEnabled && (
+        {(createEnabled || showResetOrder) && (
           <div className="column-actions">
-            <button
+            {showResetOrder && (
+              <button
+                type="button"
+                className="column-reset-order-button"
+                disabled={resettingOrder}
+                title={text("依優先順序、截止日與建立時間重新排序", "Sort by priority, due date and creation time again")}
+                onClick={() => {
+                  if (!onResetOrder || resettingOrder) return;
+                  setResettingOrder(true);
+                  void Promise.resolve()
+                    .then(() => onResetOrder())
+                    .catch(() => {})
+                    .finally(() => setResettingOrder(false));
+                }}
+              >
+                {resettingOrder ? text("排序中…", "Sorting…") : text("恢復建議排序", "Restore suggested order")}
+              </button>
+            )}
+            {createEnabled && <button
               type="button"
               className="icon-button add-task-button"
               onClick={() => onCreate(status)}
-              aria-label={text(`在${label}中新建议题`, `Create issue in ${label}`)}
-              title={text(`添加到${label}`, `Add to ${label}`)}
+              aria-label={text(`在${label}中新建议题`, `Create issue in ${label}`, `在${label}中新增任務`)}
+              title={text(`添加到${label}`, `Add to ${label}`, `新增到${label}`)}
             >
               <PlusIcon color="var(--column-status-color)" size={12} />
-            </button>
+            </button>}
           </div>
         )}
       </header>
@@ -157,6 +189,9 @@ export function BoardColumn({
               onDragStart={onDragStart}
               onDragEnd={onDragEnd}
               onOpenConversation={onOpenConversation}
+              onStartRun={onStartRun}
+              onStopRun={onStopRun}
+              onOpenRunInApp={onOpenRunInApp}
             />
           );
         })}

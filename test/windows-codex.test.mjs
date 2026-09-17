@@ -10,7 +10,7 @@ import {
 } from "../scripts/windows-codex.mjs";
 
 const appPath = String.raw`C:\Program Files\WindowsApps\OpenAI.Codex_1.0.0.0_x64__example\app\ChatGPT.exe`;
-const profilePath = String.raw`C:\Users\alice\AppData\Local\Codex Taskboard\codex-profile`;
+const profilePath = String.raw`C:\Users\alice\AppData\Local\AutoMate Taskboard\codex-profile`;
 
 test("Windows Codex process inspection uses the protected executable path", () => {
   const calls = [];

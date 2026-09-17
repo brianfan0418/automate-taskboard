@@ -19,7 +19,7 @@ afterEach(async () => {
 });
 
 async function startServer() {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-taskboard-readme-test-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "automate-taskboard-readme-test-"));
   const app = createTaskboardServer({ dataDirectory: directory });
   const address = await app.listen({ port: 0 });
   runningApps.push({ app, directory });

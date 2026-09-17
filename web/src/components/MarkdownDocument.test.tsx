@@ -1,6 +1,17 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ReactElement, ReactNode } from "react";
+import { TaskboardLanguageProvider } from "../i18n";
 import { MarkdownDocument } from "./MarkdownDocument";
+
+// The product default language is zh-TW; these assertions use the English labels, so pin the language.
+function EnglishLanguage({ children }: { children: ReactNode }) {
+  return <TaskboardLanguageProvider language="en">{children}</TaskboardLanguageProvider>;
+}
+
+function renderInEnglish(ui: ReactElement) {
+  return render(ui, { wrapper: EnglishLanguage });
+}
 
 const mermaid = vi.hoisted(() => ({
   initialize: vi.fn(),
@@ -25,7 +36,7 @@ describe("MarkdownDocument", () => {
   });
 
   it("hides raw and encoded comments without enabling adjacent raw HTML", () => {
-    render(<MarkdownDocument value={[
+    renderInEnglish(<MarkdownDocument value={[
       "<!-- trace-analysis:v1 raw -->",
       "&lt;!-- trace-analysis:v1 encoded --&gt;",
       "&lt;!-- encoded multiline\nmetadata must stay hidden --&gt;",
@@ -47,7 +58,7 @@ describe("MarkdownDocument", () => {
     ];
 
     for (const source of sources) {
-      const view = render(<MarkdownDocument value={`\`\`\`mermaid\n${source}\n\`\`\``} />);
+      const view = renderInEnglish(<MarkdownDocument value={`\`\`\`mermaid\n${source}\n\`\`\``} />);
       expect(await screen.findByRole("alert")).toBeTruthy();
       view.unmount();
     }
@@ -62,7 +73,7 @@ describe("MarkdownDocument", () => {
     ];
 
     for (const source of sources) {
-      const view = render(<MarkdownDocument value={`\`\`\`mermaid\n${source}\n\`\`\``} />);
+      const view = renderInEnglish(<MarkdownDocument value={`\`\`\`mermaid\n${source}\n\`\`\``} />);
       await expect(screen.findByRole("img", { name: "Mermaid diagram" })).resolves.toBeTruthy();
       view.unmount();
     }
@@ -70,7 +81,7 @@ describe("MarkdownDocument", () => {
   });
 
   it("keeps ordinary fenced code as code and does not load Mermaid", async () => {
-    render(<MarkdownDocument value={'```js\nconst ready = true;\n```'} />);
+    renderInEnglish(<MarkdownDocument value={'```js\nconst ready = true;\n```'} />);
 
     expect(document.querySelector("pre code.language-js")?.textContent).toContain("const ready = true;");
     await Promise.resolve();
@@ -81,7 +92,7 @@ describe("MarkdownDocument", () => {
     mermaid.render.mockResolvedValue({
       svg: '<' + 'svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"><script>alert(1)</script><foreignObject>unsafe</foreignObject><image href="https://tracker.invalid/pixel.png"/><style>@import url(https://tracker.invalid/style.css)</style><style>.node{fill:#fff}</style><text>safe diagram</text></svg>',
     });
-    render(<MarkdownDocument value={'```mermaid\ngraph TD; A-->B\n```'} />);
+    renderInEnglish(<MarkdownDocument value={'```mermaid\ngraph TD; A-->B\n```'} />);
 
     expect(screen.getByText("Mermaid source")).toBeTruthy();
     const diagram = await screen.findByRole("img", { name: "Mermaid diagram" });
@@ -97,7 +108,7 @@ describe("MarkdownDocument", () => {
 
   it("renders valid Mermaid when Web Crypto is unavailable", async () => {
     vi.stubGlobal("crypto", undefined);
-    render(<MarkdownDocument value={'```mermaid\nflowchart LR; A-->B\n```'} />);
+    renderInEnglish(<MarkdownDocument value={'```mermaid\nflowchart LR; A-->B\n```'} />);
 
     await expect(screen.findByRole("img", { name: "Mermaid diagram" })).resolves.toBeTruthy();
     expect(mermaid.render).toHaveBeenCalledWith(
@@ -108,7 +119,7 @@ describe("MarkdownDocument", () => {
   });
 
   it("rerenders Mermaid for dark mode", async () => {
-    render(<MarkdownDocument value={'```mermaid\ngraph TD; A-->B\n```'} />);
+    renderInEnglish(<MarkdownDocument value={'```mermaid\ngraph TD; A-->B\n```'} />);
     await screen.findByRole("img", { name: "Mermaid diagram" });
 
     document.documentElement.dataset.theme = "dark";
@@ -120,7 +131,7 @@ describe("MarkdownDocument", () => {
   it("shows readable source when Mermaid rejects malformed input", async () => {
     mermaid.render.mockRejectedValue(new Error("parse failed"));
     const nodesBeforeRender = document.body.childElementCount;
-    render(<MarkdownDocument value={'```mermaid\nnot a diagram <script>alert(1)</script>\n```'} />);
+    renderInEnglish(<MarkdownDocument value={'```mermaid\nnot a diagram <script>alert(1)</script>\n```'} />);
 
     const fallback = await screen.findByRole("alert");
     expect(fallback.textContent).toContain("Unable to render Mermaid diagram");
@@ -131,7 +142,7 @@ describe("MarkdownDocument", () => {
 
   it("uses the readable fallback when sanitization removes the SVG payload", async () => {
     mermaid.render.mockResolvedValue({ svg: "<script>alert(1)</script>" });
-    render(<MarkdownDocument value={'```mermaid\ngraph TD; A-->B\n```'} />);
+    renderInEnglish(<MarkdownDocument value={'```mermaid\ngraph TD; A-->B\n```'} />);
 
     expect(await screen.findByRole("alert")).toBeTruthy();
     expect(document.querySelector('.markdown-mermaid[role="img"]')).toBeNull();

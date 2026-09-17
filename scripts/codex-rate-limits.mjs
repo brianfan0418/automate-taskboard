@@ -13,7 +13,7 @@ export async function readCodexQuotaStatus(model) {
     const session = startAppServer();
     try {
       await session.request("initialize", {
-        clientInfo: { name: "codex-taskboard", version: "0.1.0" },
+        clientInfo: { name: "automate-taskboard", version: "0.1.0" },
       });
       session.notify("initialized", {});
       const account = await session.request("account/read", { refreshToken: false });
@@ -38,6 +38,7 @@ function startAppServer() {
   const child = spawn(command.executable, command.args, {
     env: withoutTaskboardLauncherEnvironment(process.env),
     stdio: ["pipe", "pipe", "ignore"],
+    windowsHide: true,
   });
   const pending = new Map();
   let sequence = 0;

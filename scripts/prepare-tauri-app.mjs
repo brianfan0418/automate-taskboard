@@ -17,6 +17,8 @@ import {
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
+import { updateSourceConfig } from "../shared/update-manifest.mjs";
+
 const nodeVersion = "22.23.2";
 const nodeArchitectures = ["arm64", "x64"];
 const nodeArchiveSha256 = {
@@ -48,13 +50,13 @@ const extractionDirectory = path.join(runtimeCacheDirectory, "extracted");
 const target = parseTarget(process.argv.slice(2));
 
 if (target === windowsTarget && process.platform !== "win32") {
-  throw new Error("Codex Taskboard for Windows must be prepared on Windows");
+  throw new Error("AutoMate Taskboard for Windows must be prepared on Windows");
 }
 if (target === linuxTarget && process.platform !== "linux") {
-  throw new Error("Codex Taskboard for Linux must be prepared on Linux");
+  throw new Error("AutoMate Taskboard for Linux must be prepared on Linux");
 }
 if (target !== windowsTarget && target !== linuxTarget && process.platform !== "darwin") {
-  throw new Error("Codex Taskboard for macOS must be prepared on macOS");
+  throw new Error("AutoMate Taskboard for macOS must be prepared on macOS");
 }
 
 function parseTarget(argv) {
@@ -205,7 +207,7 @@ async function prepareLinuxNodeRuntime() {
   const runtime = path.join(destination, `node-v${nodeVersion}-linux-x64`);
   const targetPath = path.join(
     binariesDirectory,
-    `codex-taskboard-node-${linuxTarget}`,
+    `automate-taskboard-node-${linuxTarget}`,
   );
   await mkdir(binariesDirectory, { recursive: true });
   await rm(targetPath, { force: true });
@@ -234,8 +236,8 @@ async function copyApplicationResources() {
       recursive: true,
     }),
     cp(
-      path.join(projectRoot, "skills", "manage-taskboard"),
-      path.join(appResources, "skills", "manage-taskboard"),
+      path.join(projectRoot, "skills", "manage-automate-taskboard"),
+      path.join(appResources, "skills", "manage-automate-taskboard"),
       { recursive: true },
     ),
   ]);
@@ -251,8 +253,10 @@ async function copyApplicationResources() {
     "codex-cdp-pipe.mjs",
     "codex-injector.mjs",
     "codex-injector-runtime.mjs",
+    "codex-profile-ownership.mjs",
     "codex-rate-limits.mjs",
     "taskboard-supervisor.mjs",
+    "update-check.mjs",
     "windows-codex.mjs",
   ]) {
     await copyFile(
@@ -260,10 +264,15 @@ async function copyApplicationResources() {
       path.join(appResources, "scripts", fileName),
     );
   }
+  // Amendment 11: the shared-folder update source is a build setting, never a source constant.
+  await writeFile(
+    path.join(resourcesDirectory, "update-source.json"),
+    `${JSON.stringify(updateSourceConfig(process.env), null, 2)}\n`,
+  );
   await mkdir(path.join(appResources, "inject"), { recursive: true });
   await copyFile(
-    path.join(projectRoot, "inject", "codex-taskboard.user.js"),
-    path.join(appResources, "inject", "codex-taskboard.user.js"),
+    path.join(projectRoot, "inject", "automate-taskboard.user.js"),
+    path.join(appResources, "inject", "automate-taskboard.user.js"),
   );
   await mkdir(path.join(appResources, "cli"), { recursive: true });
   await copyFile(
@@ -275,7 +284,7 @@ async function copyApplicationResources() {
     const taskctlWrapper = [
       "@echo off",
       "setlocal",
-      "set \"CODEX_TASKBOARD_DATA_DIR=%APPDATA%\\Codex Taskboard\"",
+      "set \"CODEX_TASKBOARD_DATA_DIR=%APPDATA%\\AutoMate Taskboard\"",
       "set \"CODEX_TASKBOARD_RUNTIME_FILE=%CODEX_TASKBOARD_DATA_DIR%\\launcher-runtime.json\"",
       "\"%~dp0..\\node.exe\" \"%~dp0..\\app\\cli\\taskctl.mjs\" %*",
       "exit /b %ERRORLEVEL%",
@@ -293,11 +302,11 @@ set -u
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 RESOURCE_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
-export CODEX_TASKBOARD_DATA_DIR="\${XDG_DATA_HOME:-$HOME/.local/share}/Codex Taskboard"
+export CODEX_TASKBOARD_DATA_DIR="\${XDG_DATA_HOME:-$HOME/.local/share}/AutoMate Taskboard"
 if [ -z "\${WSL_DISTRO_NAME-}" ] && [ -z "\${WSL_INTEROP-}" ] && [ -z "\${CODEX_TASKBOARD_RUNTIME_FILE-}" ]; then
   export CODEX_TASKBOARD_RUNTIME_FILE="$CODEX_TASKBOARD_DATA_DIR/launcher-runtime.json"
 fi
-exec "$RESOURCE_DIR/../../bin/codex-taskboard-node" "$RESOURCE_DIR/app/cli/taskctl.mjs" "$@"
+exec "$RESOURCE_DIR/../../bin/automate-taskboard-node" "$RESOURCE_DIR/app/cli/taskctl.mjs" "$@"
 `;
     const taskctlPath = path.join(resourcesDirectory, "bin", "taskctl");
     await mkdir(path.dirname(taskctlPath), { recursive: true });
@@ -315,7 +324,7 @@ if [ -L "$SCRIPT_PATH" ]; then
 fi
 SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 CONTENTS_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-export CODEX_TASKBOARD_DATA_DIR="$HOME/Library/Application Support/Codex Taskboard"
+export CODEX_TASKBOARD_DATA_DIR="$HOME/Library/Application Support/AutoMate Taskboard"
 export CODEX_TASKBOARD_RUNTIME_FILE="$CODEX_TASKBOARD_DATA_DIR/launcher-runtime.json"
 exec "$CONTENTS_DIR/MacOS/node" "$CONTENTS_DIR/Resources/app/cli/taskctl.mjs" "$@"
 `;

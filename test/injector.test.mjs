@@ -21,7 +21,7 @@ test("the resident injector authenticates its launcher-managed Taskboard service
   assert.match(supervisorSource, /function createTaskboardSupervisor/);
   assert.match(source, /CODEX_TASKBOARD_INSTANCE_TOKEN/);
   assert.match(source, /createHmac\("sha256"/);
-  assert.match(source, /x-codex-taskboard-challenge/);
+  assert.match(source, /x-automate-taskboard-challenge/);
   assert.match(source, /proof/);
   assert.match(source, /taskboardInstanceSecret/);
   assert.match(source, /Page\.setDocumentContent/);
@@ -31,12 +31,12 @@ test("the resident injector authenticates its launcher-managed Taskboard service
   assert.match(source, /await supervisor\.ensure\(\)/);
   assert.match(source, /it will be restarted automatically/);
   assert.match(source, /AbortSignal\.timeout\(1_500\)/);
-  assert.match(source, /__CODEX_TASKBOARD_FRAME_CAPABILITY__/);
+  assert.match(source, /__AUTOMATE_TASKBOARD_FRAME_CAPABILITY__/);
   assert.match(runtimeSource, /request\.frameCapability/);
 });
 
 test("the CDP bridge accepts service ensure and native task conversation start actions", () => {
-  assert.match(source, /const hostBindingName = "__codexTaskboardHostV1"/);
+  assert.match(source, /const hostBindingName = "__automateTaskboardHostV1"/);
   assert.match(runtimeSource, /request\.action === "ensure"/);
   assert.match(runtimeSource, /request\.action === "start-task-conversation"/);
   assert.match(runtimeSource, /request\.action === "open-external"/);
@@ -210,8 +210,8 @@ test("managed private-CDP spawn failures are bounded without changing the launch
   assert.notEqual(launchStart, -1);
   assert.notEqual(launchEnd, -1);
 
-  const executable = String.raw`C:\Users\alice\AppData\Roaming\Codex Taskboard\codex-runtime\codex.exe`;
-  const profile = String.raw`C:\Users\alice\AppData\Roaming\Codex Taskboard\codex-profile`;
+  const executable = String.raw`C:\Users\alice\AppData\Roaming\AutoMate Taskboard\codex-runtime\codex.exe`;
+  const profile = String.raw`C:\Users\alice\AppData\Roaming\AutoMate Taskboard\codex-profile`;
   const launches = [];
   let spawnMode = "failure";
   let browserOpenCount = 0;
@@ -314,10 +314,10 @@ test("the package injection command remains resident for tab-triggered recovery"
   assert.match(packageJson.scripts["codex:inject"], /--watch/);
   assert.match(packageJson.scripts["codex:daemon"], /--daemon --open/);
   assert.match(source, /function startResidentInjector/);
-  assert.match(source, /const defaultCodexDebuggingPort = 9229/);
+  assert.match(source, /const defaultCodexDebuggingPort = 9239/);
   assert.match(source, /port: defaultCodexDebuggingPort/);
   assert.match(source, /--startup-token/);
-  assert.match(source, /__codexTaskboardHostStartupTokenV1/);
+  assert.match(source, /__automateTaskboardHostStartupTokenV1/);
 });
 
 test("the existing-Codex fallback opens its deep link with the platform default application", () => {
@@ -329,9 +329,9 @@ test("the existing-Codex fallback opens its deep link with the platform default 
 
 test("attach reconciles the renderer against a hashed current injection source", () => {
   assert.match(source, /createHash\("sha256"\)/);
-  assert.match(source, /__CODEX_TASKBOARD_SOURCE_HASH__/);
-  assert.match(source, /sourceHash: window\.__codexTaskboardInjection__\?\.sourceHash \|\| null/);
-  assert.match(source, /const injectionScriptIdentifierName = "__CODEX_TASKBOARD_SCRIPT_IDENTIFIER__"/);
+  assert.match(source, /__AUTOMATE_TASKBOARD_SOURCE_HASH__/);
+  assert.match(source, /sourceHash: window\.__automateTaskboardInjection__\?\.sourceHash \|\| null/);
+  assert.match(source, /const injectionScriptIdentifierName = "__AUTOMATE_TASKBOARD_SCRIPT_IDENTIFIER__"/);
   assert.match(source, /scriptIdentifier: window\[\$\{JSON\.stringify\(injectionScriptIdentifierName\)\}\] \|\| null/);
   assert.match(source, /Page\.removeScriptToEvaluateOnNewDocument/);
   assert.match(source, /Page\.addScriptToEvaluateOnNewDocument/);
@@ -350,12 +350,12 @@ test("a completed web build refreshes an already-open Codex iframe", () => {
   assert.match(source, /function codexDebuggingPorts/);
   assert.match(source, /--remote-debugging-port=/);
   assert.match(source, /taskboard\.reloadFrame\(\)/);
-  assert.match(source, /__codex_taskboard_refresh/);
+  assert.match(source, /__automate_taskboard_refresh/);
   assert.match(source, /await restartResidentInjectorForRefresh\(port\)/);
 });
 
 test("the injected iframe follows the configured local service port", () => {
   assert.match(source, /const taskboardBaseUrl = `\$\{taskboardOrigin\}\/\$\{encodeURIComponent\(taskboardInstanceToken\)\}`/);
   assert.match(source, /const taskboardPageUrl = `\$\{taskboardBaseUrl\}\/\?host=codex`/);
-  assert.match(source, /window\.__CODEX_TASKBOARD_URL__ = \$\{JSON\.stringify\(taskboardPageUrl\)\}/);
+  assert.match(source, /window\.__AUTOMATE_TASKBOARD_URL__ = \$\{JSON\.stringify\(taskboardPageUrl\)\}/);
 });

@@ -1,6 +1,6 @@
 function frameCapability() {
-  return typeof globalThis.__CODEX_TASKBOARD_FRAME_CAPABILITY__ === "string"
-    ? globalThis.__CODEX_TASKBOARD_FRAME_CAPABILITY__
+  return typeof globalThis.__AUTOMATE_TASKBOARD_FRAME_CAPABILITY__ === "string"
+    ? globalThis.__AUTOMATE_TASKBOARD_FRAME_CAPABILITY__
     : "";
 }
 

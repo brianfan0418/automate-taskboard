@@ -17,9 +17,12 @@ export class CodexAppServerError extends Error {
 }
 
 export class CodexAppServer {
-  constructor({ executable, processEnv = process.env, requestTimeoutMs } = {}) {
+  constructor({ executable, processEnv = process.env, requestTimeoutMs, extraEnv = null } = {}) {
     this.executable = executable;
     this.processEnv = withoutTaskboardLauncherEnvironment(processEnv);
+    // Board runs: variables added after the launcher scrub (object or () => object, read at spawn),
+    // e.g. CODEX_TASKBOARD_URL so a skill that calls taskctl targets this board.
+    this.extraEnv = extraEnv;
     this.requestTimeoutMs = requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.child = null;
     this.starting = null;
@@ -28,6 +31,11 @@ export class CodexAppServer {
     this.pending = new Map();
     this.listeners = new Set();
     this.terminatedChildren = new WeakSet();
+  }
+
+  childEnvironment() {
+    const extra = typeof this.extraEnv === "function" ? this.extraEnv() : this.extraEnv;
+    return extra && typeof extra === "object" ? { ...this.processEnv, ...extra } : this.processEnv;
   }
 
   subscribe(listener) {
@@ -57,6 +65,10 @@ export class CodexAppServer {
 
   interruptTurn(params) {
     return this.request("turn/interrupt", params);
+  }
+
+  steerTurn({ threadId, input, expectedTurnId }) {
+    return this.request("turn/steer", { threadId, input, expectedTurnId });
   }
 
   compactThread(threadId) {
@@ -96,8 +108,9 @@ export class CodexAppServer {
     const starting = new Promise((resolve, reject) => {
       const command = executableCommand(this.executable, ["app-server", "--stdio"]);
       const child = spawn(command.executable, command.args, {
-        env: this.processEnv,
+        env: this.childEnvironment(),
         stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
       });
       this.child = child;
       const output = { stdoutBuffer: "", stderr: "" };
@@ -125,8 +138,8 @@ export class CodexAppServer {
       child.once("spawn", () => {
         this.#sendRequest(child, "initialize", {
           clientInfo: {
-            name: "codex-taskboard",
-            title: "Codex Taskboard",
+            name: "automate-taskboard",
+            title: "AutoMate Taskboard",
             version: "1.0.1",
           },
           capabilities: {
@@ -295,6 +308,10 @@ export class CodexHostAppServer {
 
   interruptTurn(params) {
     return this.request("turn/interrupt", params);
+  }
+
+  steerTurn({ threadId, input, expectedTurnId }) {
+    return this.request("turn/steer", { threadId, input, expectedTurnId });
   }
 
   compactThread(threadId) {

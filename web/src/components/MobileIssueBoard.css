@@ -1,0 +1,489 @@
+/* Mobile vertical board (≤719px). Ported from the fork's MobileIssueBoard.css and adapted to MobileBoard. */
+
+.mobile-board {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 0.625rem;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  padding: 0.625rem 0.625rem calc(1.375rem + env(safe-area-inset-bottom, 0px));
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  background: var(--bg);
+}
+
+.mobile-board-section {
+  position: relative;
+  flex: 0 0 auto;
+  border: var(--border-hairline) solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-muted);
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.mobile-board-section.is-drop-target {
+  border-color: color-mix(in srgb, var(--accent) 62%, var(--border));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.mobile-board-section-heading {
+  position: sticky;
+  z-index: 5;
+  top: 0;
+  margin: 0;
+  border-radius: 10px;
+  background: var(--surface-muted);
+  font-size: inherit;
+  font-weight: inherit;
+}
+
+.mobile-board-section-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  min-height: 2.75rem;
+  padding: 0 0.75rem;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 1rem;
+  font-weight: 600;
+  text-align: left;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.mobile-board-section-header:focus-visible,
+.mobile-task-card-open:focus-visible,
+.mobile-move-sheet button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.mobile-board-chevron {
+  flex: 0 0 auto;
+  color: var(--text-tertiary);
+}
+
+.mobile-board-status-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.mobile-board-section-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-board-section-count {
+  margin-left: auto;
+  color: var(--text-tertiary);
+  font-size: 0.875rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+.mobile-board-list {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-height: 2.75rem;
+  padding: 0 0.5rem 0.625rem;
+}
+
+.mobile-board-empty {
+  padding: 0.625rem 0.25rem;
+  color: var(--text-tertiary);
+  font-size: 0.875rem;
+}
+
+.mobile-task-card {
+  position: relative;
+  display: grid;
+  gap: 0.375rem;
+  min-width: 0;
+  padding: 0.625rem 0.75rem;
+  border: var(--border-hairline) solid var(--border);
+  border-radius: 9px;
+  background: var(--surface);
+  touch-action: pan-y;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.mobile-task-card-open {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  padding: 0;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.mobile-task-card-open:active {
+  background: color-mix(in srgb, var(--text-primary) 4%, transparent);
+}
+
+.mobile-task-card-topline {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  min-height: 1.25rem;
+  color: var(--text-tertiary);
+  font-size: 0.75rem;
+}
+
+.mobile-task-card-identifier {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-task-card-running {
+  color: var(--status-progress);
+  font-weight: 600;
+}
+
+.mobile-task-card-complete {
+  position: relative;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  min-height: 2rem;
+  margin-left: auto;
+  padding: 0 0.75rem;
+  border: var(--border-hairline) solid color-mix(in srgb, var(--status-review) 55%, var(--border));
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--status-review);
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.mobile-task-card h3 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 1rem;
+  font-weight: 560;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.mobile-task-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.375rem 0.625rem;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+}
+
+.mobile-task-card-meta > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.mobile-task-card-priority.priority-urgent,
+.mobile-task-card-priority.priority-high {
+  color: var(--priority-urgent);
+}
+
+.mobile-task-card-project {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-task-card-assignee {
+  margin-left: auto;
+}
+
+.mobile-task-card-assignee .actor-avatar {
+  width: 1.125rem;
+  height: 1.125rem;
+  border-width: 1px;
+  font-size: 0.625rem;
+  line-height: 1;
+}
+
+.mobile-task-card.is-moving {
+  opacity: 0.6;
+}
+
+.mobile-task-card.is-mobile-dragging {
+  z-index: 20;
+  opacity: 0.92;
+  box-shadow: var(--dialog-shadow);
+  transform: scale(1.02);
+}
+
+.mobile-task-card.is-mobile-drop-before::before {
+  position: absolute;
+  z-index: 30;
+  top: -0.375rem;
+  right: 2px;
+  left: 2px;
+  height: 0.1875rem;
+  border-radius: 999px;
+  background: var(--accent);
+  content: "";
+}
+
+.mobile-board-section.is-mobile-drop-at-end .mobile-board-list::after {
+  display: block;
+  height: 0.1875rem;
+  margin: 0 2px;
+  border-radius: 999px;
+  background: var(--accent);
+  content: "";
+}
+
+body.is-mobile-task-dragging {
+  cursor: grabbing;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.mobile-board-loading-section {
+  position: relative;
+  padding: 2.75rem 0.5rem 0.625rem;
+  border-radius: 10px;
+  background: var(--surface-muted);
+}
+
+.mobile-board-loading-section span,
+.mobile-board-loading-section div {
+  display: block;
+  border-radius: 6px;
+  background: linear-gradient(90deg, var(--surface-muted), var(--surface), var(--surface-muted));
+  background-size: 220% 100%;
+  animation: shimmer 1.5s linear infinite;
+}
+
+.mobile-board-loading-section span {
+  position: absolute;
+  top: 1.0625rem;
+  left: 0.75rem;
+  width: 5.25rem;
+  height: 0.625rem;
+}
+
+.mobile-board-loading-section div {
+  height: 4rem;
+}
+
+.mobile-board-loading-section div + div {
+  margin-top: 0.5rem;
+}
+
+/* Destination sheet */
+
+.mobile-move-sheet-backdrop {
+  position: fixed;
+  z-index: 1650;
+  inset: 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  background: rgba(13, 14, 16, 0.32);
+}
+
+.mobile-move-sheet {
+  width: 100%;
+  max-width: 35rem;
+  max-height: min(80vh, 40rem);
+  padding: 0.375rem 1rem calc(1rem + env(safe-area-inset-bottom, 0px));
+  overflow-y: auto;
+  border-radius: 16px 16px 0 0;
+  background: var(--surface);
+  box-shadow: var(--dialog-shadow);
+  animation: mobile-move-sheet-in 180ms ease-out;
+}
+
+@keyframes mobile-move-sheet-in {
+  from {
+    transform: translateY(1.5rem);
+    opacity: 0;
+  }
+
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.mobile-move-sheet-grabber {
+  width: 2.25rem;
+  height: 0.25rem;
+  margin: 0.25rem auto 0.625rem;
+  border-radius: 999px;
+  background: var(--border);
+}
+
+.mobile-move-sheet-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+}
+
+.mobile-move-sheet-heading {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.mobile-move-sheet-heading small {
+  color: var(--text-tertiary);
+  font-size: 0.875rem;
+}
+
+.mobile-move-sheet-heading h2 {
+  margin: 2px 0 0;
+  color: var(--text-primary);
+  font-size: 1.125rem;
+  font-weight: 600;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.mobile-move-sheet-close {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  border: 0;
+  border-radius: 8px;
+  background: var(--surface-muted);
+  color: var(--text-secondary);
+}
+
+.mobile-move-sheet-prompt {
+  margin: 0.875rem 0 0.5rem;
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+}
+
+.mobile-move-sheet-destinations {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+
+.mobile-move-sheet-destination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0.5rem;
+  min-width: 0;
+  min-height: 2.75rem;
+  padding: 0 0.75rem;
+  border: var(--border-hairline) solid var(--border);
+  border-radius: 9px;
+  background: var(--surface);
+  color: var(--text-primary);
+  font-size: 1rem;
+  text-align: left;
+}
+
+.mobile-move-sheet-destination:active {
+  background: var(--surface-muted);
+}
+
+.mobile-move-sheet-note {
+  margin: 0.75rem 0 0;
+  padding: 0.5rem 0.625rem;
+  border-radius: 8px;
+  background: var(--surface-muted);
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+.mobile-move-sheet-details {
+  width: 100%;
+  min-height: 2.75rem;
+  margin-top: 0.75rem;
+  border: 0;
+  border-radius: 9px;
+  background: var(--accent);
+  color: #ffffff;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+@media (max-width: 719px) {
+  /* Only when MobileBoard is mounted: one board, so view tabs and the side panel toggle are hidden. */
+  .workspace:has(.mobile-board) .board-toolbar {
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+    min-height: auto;
+    overflow: visible;
+  }
+
+  .workspace:has(.mobile-board) .view-tabs,
+  .workspace:has(.mobile-board) .other-tasks-trigger {
+    display: none;
+  }
+
+  .workspace:has(.mobile-board) .toolbar-tools {
+    width: 100%;
+    min-width: 0;
+    overflow: visible;
+  }
+
+  .workspace:has(.mobile-board) .toolbar-tools .search-field {
+    flex: 1 1 9.375rem;
+    min-width: 7.5rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mobile-board-section,
+  .mobile-move-sheet {
+    transition: none;
+    animation: none;
+  }
+
+  .mobile-board-loading-section span,
+  .mobile-board-loading-section div {
+    animation: none;
+  }
+}
+
+/* v2 run controls on phone cards (above the full-card open button). */
+.mobile-task-card-run {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 0.375rem;
+  pointer-events: none;
+}
+
+.mobile-task-card-run .task-run-chip {
+  pointer-events: none;
+}
+
+.mobile-task-card-run-button {
+  min-height: 2rem;
+  padding: 0 0.75rem;
+  pointer-events: auto;
+}

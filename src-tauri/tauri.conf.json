@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Codex Taskboard",
-  "version": "1.1.23",
-  "identifier": "com.chuspeeism.codex-taskboard",
+  "productName": "AutoMate Taskboard",
+  "version": "2.0.4",
+  "identifier": "io.github.automate-taskboard",
   "app": {
     "windows": []
   },
@@ -10,13 +10,13 @@
     "active": true,
     "targets": ["app", "dmg"],
     "category": "Productivity",
-    "shortDescription": "在 Codex 客户端中打开本地任务面板",
+    "shortDescription": "本機任務面板，可交辦給 Codex 與 Claude",
     "createUpdaterArtifacts": true,
     "externalBin": ["binaries/node"],
     "resources": {
       "resources/": ""
     },
-    "icon": ["../web/public/codex-app-icon.png", "icons/icon.icns"],
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.png", "icons/icon.icns", "icons/icon.ico"],
     "macOS": {
       "minimumSystemVersion": "14.0",
       "hardenedRuntime": true,
@@ -27,7 +27,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDIzOTE3QTI2OTdFNUNDOUQKUldTZHpPV1hKbnFSSStlc3dBblBhVzEydlRGR29seE5EeDhyUFR4NUZDT29kSHQ3MTFES2xuK0IK",
       "endpoints": [
-        "https://github.com/chuspeeism/dashi-taskboard/releases/latest/download/latest.json"
+        "https://github.com/brianfan0418/automate-taskboard/releases/latest/download/latest.json"
       ]
     }
   }

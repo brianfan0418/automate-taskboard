@@ -1,0 +1,45 @@
+/* v2 backend automation settings: free-text model fields next to the existing pickers. */
+
+.project-automation-text-input {
+  box-sizing: border-box;
+  flex: 0 0 8.25rem;
+  width: 8.25rem;
+  height: 1.625rem;
+  padding: 0 0.375rem;
+  border: var(--border-hairline) solid var(--border);
+  border-radius: 5px;
+  outline: 0;
+  background: var(--surface);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 0.875rem;
+}
+
+.project-automation-text-input::placeholder {
+  color: var(--text-tertiary);
+}
+
+.project-automation-text-input:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+.project-automation-text-input:focus-visible {
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.project-automation-text-input:disabled {
+  opacity: 0.6;
+}
+
+.project-automation-field > span {
+  margin-right: 0.5rem;
+}
+
+/* Amendment 5: 「Claude 權限」 select; its option texts are long, so the control gets more room. */
+.project-automation-select {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+  max-width: 13.75rem;
+  text-overflow: ellipsis;
+}

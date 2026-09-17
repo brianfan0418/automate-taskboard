@@ -125,10 +125,16 @@ export function parseThreadId(value) {
   return stringField(value, "threadId", { required: true, maxLength: 256 });
 }
 
+export const ASSIGNEE_TARGETS = Object.freeze(["current-user", "codex-agent", "claude-agent"]);
+
+export function isAssigneeTarget(value) {
+  return ASSIGNEE_TARGETS.includes(value);
+}
+
 export function parseAssigneeTarget(value) {
   if (value === undefined) return undefined;
-  if (value !== "current-user" && value !== "codex-agent") {
-    throw new ApiError(400, "INVALID_FIELD", "'assigneeTarget' must be current-user or codex-agent");
+  if (!isAssigneeTarget(value)) {
+    throw new ApiError(400, "INVALID_FIELD", "'assigneeTarget' must be current-user, codex-agent, or claude-agent");
   }
   return value;
 }

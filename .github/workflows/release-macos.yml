@@ -376,7 +376,7 @@ jobs:
         run: |
           umask 077
           CERTIFICATE_PATH="$RUNNER_TEMP/developer-id.p12"
-          KEYCHAIN_PATH="$RUNNER_TEMP/codex-taskboard-signing.keychain-db"
+          KEYCHAIN_PATH="$RUNNER_TEMP/automate-taskboard-signing.keychain-db"
 
           printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$CERTIFICATE_PATH"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
@@ -423,7 +423,7 @@ jobs:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
         run: |
           APP_PATH="src-tauri/target/universal-apple-darwin/release/bundle/macos/$APP_NAME"
-          APP_ZIP="$RUNNER_TEMP/Codex.Taskboard.app.zip"
+          APP_ZIP="$RUNNER_TEMP/AutoMate.Taskboard.app.zip"
           /usr/bin/ditto -c -k --keepParent --sequesterRsrc "$APP_PATH" "$APP_ZIP"
           xcrun notarytool submit "$APP_ZIP" \
             --key-id "$APPLE_API_KEY" \
@@ -448,7 +448,7 @@ jobs:
           (
             cd "$BUNDLE_ROOT/macos"
             ../dmg/bundle_dmg.sh \
-              --volname "Codex Taskboard" \
+              --volname "AutoMate Taskboard" \
               --icon "$APP_NAME" 180 170 \
               --app-drop-link 480 170 \
               --window-size 660 400 \
@@ -516,7 +516,7 @@ jobs:
       - name: Remove temporary signing files
         if: always()
         run: |
-          security delete-keychain "$RUNNER_TEMP/codex-taskboard-signing.keychain-db" 2>/dev/null || true
+          security delete-keychain "$RUNNER_TEMP/automate-taskboard-signing.keychain-db" 2>/dev/null || true
           rm -f "$RUNNER_TEMP/developer-id.p12"
           rm -f "$RUNNER_TEMP/app-store-connect.p8"
 
@@ -573,8 +573,8 @@ jobs:
           jq \
             --rawfile deb_signature "$LINUX_DEB.sig" \
             --rawfile appimage_signature "$LINUX_APPIMAGE.sig" \
-            --arg deb_url "https://github.com/chuspeeism/dashi-taskboard/releases/download/$RELEASE_TAG/$LINUX_DEB_NAME" \
-            --arg appimage_url "https://github.com/chuspeeism/dashi-taskboard/releases/download/$RELEASE_TAG/$LINUX_APPIMAGE_NAME" \
+            --arg deb_url "https://github.com/brianfan0418/automate-taskboard/releases/download/$RELEASE_TAG/$LINUX_DEB_NAME" \
+            --arg appimage_url "https://github.com/brianfan0418/automate-taskboard/releases/download/$RELEASE_TAG/$LINUX_APPIMAGE_NAME" \
             '.platforms["linux-x86_64-deb"] = {signature: $deb_signature, url: $deb_url}
              | .platforms["linux-x86_64-appimage"] = {signature: $appimage_signature, url: $appimage_url}' \
             "$LATEST_PATH" > "$LATEST_PATH.linux"
@@ -652,7 +652,7 @@ jobs:
             --verify-tag \
             --target "$GITHUB_SHA" \
             "${RELEASE_FLAGS[@]}" \
-            --title "Codex Taskboard $RELEASE_TAG" \
+            --title "AutoMate Taskboard $RELEASE_TAG" \
             --generate-notes \
             "${ASSET_PATHS[0]}"
           gh release upload "$RELEASE_TAG" \

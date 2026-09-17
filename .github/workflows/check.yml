@@ -39,7 +39,7 @@ jobs:
           const paths = execFileSync('git', ['diff', '--name-only', '--no-renames', '-z', 'HEAD^1', 'HEAD'], { encoding: 'utf8' }).split('\0').filter(Boolean);
           const webOrDocsOnly = paths.every(path =>
             path.startsWith('web/src/') || path === 'web/index.html' ||
-            (path.startsWith('web/public/') && path !== 'web/public/codex-app-icon.png') ||
+            path.startsWith('web/public/') ||
             path.startsWith('docs/') ||
             /^(?:README(?:\.[^/]+)?\.md|AGENTS\.md|LICENSE(?:\.[^/]+)?)$/.test(path));
           appendFileSync(process.env.GITHUB_OUTPUT, `run_native=${!webOrDocsOnly}\n`);
@@ -54,7 +54,7 @@ jobs:
         run: |
           set -euo pipefail
           API_VERSION_HEADER="X-GitHub-Api-Version: 2026-03-10"
-          ATTESTATION_SCHEMA="codex-taskboard.pr-check-tree.v1"
+          ATTESTATION_SCHEMA="automate-taskboard.pr-check-tree.v1"
           printf 'run_full=true\n' > "$GITHUB_OUTPUT"
 
           if ! MAIN_COMMIT="$(gh api \
@@ -239,7 +239,7 @@ jobs:
         run: |
           set -euo pipefail
           jq -n \
-            --arg schema "codex-taskboard.pr-check-tree.v1" \
+            --arg schema "automate-taskboard.pr-check-tree.v1" \
             --arg base_sha "$PR_BASE_SHA" \
             --arg head_sha "$PR_HEAD_SHA" \
             --arg checked_sha "$GITHUB_SHA" \
@@ -293,15 +293,15 @@ jobs:
           --bundles app
           --no-sign
           --config '{"bundle":{"createUpdaterArtifacts":false}}'
-      - run: test -d "src-tauri/target/universal-apple-darwin/release/bundle/macos/Codex Taskboard.app"
+      - run: test -d "src-tauri/target/universal-apple-darwin/release/bundle/macos/AutoMate Taskboard.app"
       - name: Verify packaged taskctl and inherited listener
         run: >-
           npm run app:verify-packaged-taskctl --
-          "src-tauri/target/universal-apple-darwin/release/bundle/macos/Codex Taskboard.app"
+          "src-tauri/target/universal-apple-darwin/release/bundle/macos/AutoMate Taskboard.app"
       - name: Verify secretless App, updater, and DMG preflight
         run: >-
           npm run app:preflight --
-          "src-tauri/target/universal-apple-darwin/release/bundle/macos/Codex Taskboard.app"
+          "src-tauri/target/universal-apple-darwin/release/bundle/macos/AutoMate Taskboard.app"
 
   windows-launcher:
     name: Windows x64 launcher

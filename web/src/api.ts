@@ -22,11 +22,21 @@ import type {
   IssueRelationType,
   JiraConnection,
   Project,
+  ClaudePermissionPreview,
+  ProjectAutomation,
+  ProjectAutomationDetails,
+  ProjectAutomationPatch,
   ProjectReadme,
   ProjectReadmeAttachment,
   ProjectSummary,
+  ProviderStatuses,
   Task,
   TaskChangeActivity,
+  TaskFollowup,
+  TaskFollowupMode,
+  TaskRun,
+  TaskRunStopDestination,
+  TaskRunWithOpenUrl,
   TaskboardMetadata,
   TaskDraft,
   TaskStatus,
@@ -40,7 +50,7 @@ const DEFAULT_USER_ACTOR: ActorIdentity = {
 };
 
 let currentUserActor = DEFAULT_USER_ACTOR;
-let apiText = (_chinese: string, english: string) => english;
+let apiText = (_chinese: string, english: string, _taiwanese?: string) => english;
 
 export function setCurrentUserActor(actor?: ActorIdentity) {
   currentUserActor = actor?.type === "user" ? actor : DEFAULT_USER_ACTOR;
@@ -58,18 +68,53 @@ interface ApiErrorBody {
   };
 }
 
+// W15 review O5: a run refused because its project has no folder is recognised by error code (not
+// by message text) wherever the request was made; the board listens and offers 「設定專案資料夾」.
+export const WORKSPACE_MISSING_EVENT = "taskboard:workspace-missing";
+
+function announceWorkspaceMissing(error: ApiError) {
+  if (error.code !== "WORKSPACE_NOT_FOUND") return;
+  const details = error.details as { projectId?: unknown } | undefined;
+  if (typeof details?.projectId !== "string") return;
+  try {
+    window.dispatchEvent(new CustomEvent(WORKSPACE_MISSING_EVENT, { detail: { projectId: details.projectId } }));
+  } catch {
+    // no window (tests without DOM): nothing to announce
+  }
+}
+
 export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
   readonly details?: unknown;
 
   constructor(status: number, body: ApiErrorBody) {
-    super(body.error?.message ?? apiText(`请求失败（${status}）`, `Request failed (${status})`));
+    super(body.error?.message ?? apiText(`请求失败（${status}）`, `Request failed (${status})`, `請求失敗（${status}）`));
     this.name = "ApiError";
     this.status = status;
     this.code = body.error?.code ?? "REQUEST_FAILED";
     this.details = body.error?.details;
   }
+}
+
+// v2 mobile access (CONTRACTS C7 / T5): a paired phone must send its CSRF token on every write.
+// The key must stay equal to RELAY_CSRF_STORAGE_KEY in mobileAccessApi.ts (checked by
+// web/src/v2WebIntegration.test.tsx); it is read here directly so api.ts does not import mobileAccessApi.ts
+// (which imports api.ts).
+export const MOBILE_CSRF_STORAGE_KEY = "relay-taskboard.mobile.csrf";
+export const MOBILE_CSRF_HEADER = "x-relay-csrf";
+
+// Amendment 13: sessionStorage first, then localStorage (a relaunched home-screen web app keeps its session).
+export function readMobileCsrfToken(): string | null {
+  for (const storage of [() => window.sessionStorage, () => window.localStorage]) {
+    try {
+      const value = storage().getItem(MOBILE_CSRF_STORAGE_KEY);
+      if (value) return value;
+    } catch {
+      // Try the next storage.
+    }
+  }
+  return null;
 }
 
 export function resolveTaskboardUrl(path: string): string {
@@ -87,6 +132,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (init?.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   const method = (init?.method ?? "GET").toUpperCase();
   if (method !== "GET" && method !== "HEAD") {
+    const csrfToken = readMobileCsrfToken();
+    if (csrfToken && !headers.has(MOBILE_CSRF_HEADER)) headers.set(MOBILE_CSRF_HEADER, csrfToken);
     headers.set("X-Taskboard-User-Id", currentUserActor.id);
     headers.set("X-Taskboard-User-Name", encodeURIComponent(currentUserActor.name));
     if (
@@ -143,7 +190,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     body = {} as T & ApiErrorBody;
   }
 
-  if (!response.ok) throw new ApiError(response.status, body);
+  if (!response.ok) {
+    const error = new ApiError(response.status, body);
+    announceWorkspaceMissing(error);
+    throw error;
+  }
   return body;
 }
 
@@ -518,6 +569,30 @@ export async function deleteProjectLabel(projectId: string, label: string): Prom
   return data.project;
 }
 
+// W15: set the folder AI runs use for a project (this PC only).
+export async function updateProjectWorkspace(projectId: string, workspacePath: string): Promise<Project> {
+  const data = await request<{ project: Project }>(`/api/projects/${encodeURIComponent(projectId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ workspacePath }),
+  });
+  return data.project;
+}
+
+// W15: opens the native folder dialog on this PC; `path` is null when the user cancels.
+export async function pickFolder(input: { title?: string; initialPath?: string | null } = {}): Promise<{
+  path: string | null;
+  canceled: boolean;
+  timedOut?: boolean;
+}> {
+  return request("/api/local/pick-folder", {
+    method: "POST",
+    body: JSON.stringify({
+      ...(input.title ? { title: input.title } : {}),
+      ...(input.initialPath ? { initialPath: input.initialPath } : {}),
+    }),
+  });
+}
+
 export async function deleteProject(projectId: string): Promise<void> {
   await request(`/api/projects/${encodeURIComponent(projectId)}`, {
     method: "DELETE",
@@ -675,6 +750,185 @@ export async function removeTaskRelation(
       }),
     },
   );
+}
+
+export async function startTaskRun(taskId: string): Promise<{ task: Task; run: TaskRun }> {
+  return request<{ task: Task; run: TaskRun }>(
+    `/api/tasks/${encodeURIComponent(taskId)}/run/start`,
+    {
+      method: "POST",
+      body: JSON.stringify({}),
+    },
+  );
+}
+
+export async function stopTaskRun(
+  taskId: string,
+  destination?: TaskRunStopDestination,
+): Promise<{ task: Task; run: TaskRun }> {
+  return request<{ task: Task; run: TaskRun }>(
+    `/api/tasks/${encodeURIComponent(taskId)}/run/stop`,
+    {
+      method: "POST",
+      body: JSON.stringify(destination ? { destination } : {}),
+    },
+  );
+}
+
+export async function sendTaskFollowup(
+  taskId: string,
+  body: string,
+  mode: TaskFollowupMode,
+): Promise<TaskFollowup> {
+  const data = await request<{ followup: TaskFollowup }>(
+    `/api/tasks/${encodeURIComponent(taskId)}/run/followup`,
+    {
+      method: "POST",
+      body: JSON.stringify({ body, mode }),
+    },
+  );
+  return data.followup;
+}
+
+export async function continueTask(
+  taskId: string,
+  body: string,
+): Promise<{ task: Task; run: TaskRun }> {
+  return request<{ task: Task; run: TaskRun }>(
+    `/api/tasks/${encodeURIComponent(taskId)}/continue`,
+    {
+      method: "POST",
+      body: JSON.stringify({ body }),
+    },
+  );
+}
+
+/**
+ * Sends the card back to todo with a comment. Pass the message text to create the comment in the
+ * same request, or `{ commentId }` to use a comment already created (with its attachments uploaded).
+ */
+export async function reworkTask(
+  taskId: string,
+  input: string | { commentId: string },
+): Promise<{ task: Task; comment: Comment }> {
+  return request<{ task: Task; comment: Comment }>(
+    `/api/tasks/${encodeURIComponent(taskId)}/rework`,
+    {
+      method: "POST",
+      body: JSON.stringify(typeof input === "string" ? { body: input } : { commentId: input.commentId }),
+    },
+  );
+}
+
+/**
+ * One live activity line of a run (TICKETS Amendment 2): pushed as SSE `run.activity`
+ * `{ projectId, taskId, runId, activity }` and returned by GET /api/tasks/:id/runs for the active/latest run.
+ */
+export interface TaskRunActivity {
+  kind: "message" | "command" | "file" | "tool" | "status" | string;
+  text: string;
+  at?: string;
+  createdAt?: string;
+}
+
+export interface TaskRunsResponse {
+  runs: TaskRunWithOpenUrl[];
+  followups: TaskFollowup[];
+  /** Activity of the active/latest run (runs[0] after sorting newest first); [] when the server sends none. */
+  activity: TaskRunActivity[];
+  /** Run the activity belongs to, when the server says so. */
+  activityRunId: string | null;
+}
+
+function isTaskRunActivity(value: unknown): value is TaskRunActivity {
+  return Boolean(
+    value
+    && typeof value === "object"
+    && typeof (value as TaskRunActivity).kind === "string"
+    && typeof (value as TaskRunActivity).text === "string",
+  );
+}
+
+export async function listTaskRuns(
+  taskId: string,
+  signal?: AbortSignal,
+): Promise<TaskRunsResponse> {
+  const data = await request<{
+    runs?: Array<TaskRunWithOpenUrl & { activity?: unknown }>;
+    followups?: TaskFollowup[];
+    activity?: unknown;
+    activityRunId?: unknown;
+  }>(
+    `/api/tasks/${encodeURIComponent(taskId)}/runs`,
+    { signal },
+  );
+  const runs = Array.isArray(data.runs) ? data.runs : [];
+  // The server may send `activity` at the top level or on the run it belongs to; accept both.
+  const runWithActivity = runs.find((run) => Array.isArray(run.activity));
+  const rawActivity = Array.isArray(data.activity) ? data.activity : runWithActivity?.activity;
+  return {
+    runs,
+    followups: Array.isArray(data.followups) ? data.followups : [],
+    activity: Array.isArray(rawActivity) ? rawActivity.filter(isTaskRunActivity) : [],
+    activityRunId: typeof data.activityRunId === "string"
+      ? data.activityRunId
+      : Array.isArray(data.activity) ? null : runWithActivity?.id ?? null,
+  };
+}
+
+export async function getProjectAutomation(
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<ProjectAutomation> {
+  return (await getProjectAutomationDetails(projectId, signal)).automation;
+}
+
+/** GET automation plus the Amendment 6 preview of Claude Code's own permission setting. */
+export async function getProjectAutomationDetails(
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<ProjectAutomationDetails> {
+  const data = await request<{ automation: ProjectAutomation } & Partial<ClaudePermissionPreview>>(
+    `/api/projects/${encodeURIComponent(projectId)}/automation`,
+    { signal },
+  );
+  const hasPreview = data.claudeEffectivePermissionMode !== undefined || data.claudePermissionSource !== undefined;
+  return {
+    automation: data.automation,
+    claudePermission: hasPreview
+      ? {
+        claudeEffectivePermissionMode: data.claudeEffectivePermissionMode ?? null,
+        claudePermissionSource: data.claudePermissionSource ?? null,
+      }
+      : null,
+  };
+}
+
+export async function updateProjectAutomation(
+  projectId: string,
+  patch: ProjectAutomationPatch,
+): Promise<ProjectAutomation> {
+  const data = await request<{ automation: ProjectAutomation }>(
+    `/api/projects/${encodeURIComponent(projectId)}/automation`,
+    {
+      method: "PUT",
+      body: JSON.stringify(patch),
+    },
+  );
+  return data.automation;
+}
+
+export async function resetProjectOrder(projectId: string): Promise<ProjectAutomation> {
+  const data = await request<{ automation: ProjectAutomation }>(
+    `/api/projects/${encodeURIComponent(projectId)}/order/reset`,
+    { method: "POST" },
+  );
+  return data.automation;
+}
+
+export async function getProviders(signal?: AbortSignal): Promise<ProviderStatuses> {
+  const data = await request<{ providers: ProviderStatuses }>("/api/providers", { signal });
+  return data.providers;
 }
 
 export async function listComments(taskId: string, signal?: AbortSignal): Promise<Comment[]> {

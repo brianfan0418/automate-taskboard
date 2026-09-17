@@ -12,6 +12,7 @@ import { taskboardStorage } from "../storage";
 import {
   ApiError,
   attachmentDownloadUrl,
+  continueTask,
   createComment,
   deleteComment,
   getTask,
@@ -19,16 +20,19 @@ import {
   listComments,
   listTaskActivities,
   resolveTaskboardUrl,
+  reworkTask,
   uploadAttachment,
   uploadCommentAttachment,
   updateComment,
 } from "../api";
 import {
+  isChineseLanguage,
   taskPriorityLabel,
   taskStatusLabel,
   useTaskboardI18n,
   type TaskboardLanguage,
 } from "../i18n";
+import { runErrorTextPair } from "../runErrorText";
 import { TASK_PRIORITIES, TASK_STATUSES } from "../types";
 import type {
   ActorIdentity,
@@ -48,11 +52,15 @@ import type {
   TaskStatus,
 } from "../types";
 import {
+  CLAUDE_AGENT_ACTOR,
   CODEX_AGENT_ACTOR,
   actorKey,
   assigneeTargetForActor,
 } from "../actors";
 import { ActorAvatar } from "./ActorAvatar";
+import { CreateFollowupTaskButton } from "./CreateFollowupTaskButton";
+import { FollowupComposer } from "./FollowupComposer";
+import { TaskRunPanel, isActiveTaskRun } from "./TaskRunPanel";
 import { STATUS_DETAILS } from "./BoardColumn";
 import { LabelPicker } from "./LabelPicker";
 import { LinearIcon } from "./LinearIcon";
@@ -92,11 +100,19 @@ import {
 import { TaskPropertyPicker } from "./TaskPropertyPicker";
 import { buildIssueUrl } from "../issueRoute";
 import { postEmbeddedHostMessage } from "../embeddedHost.mjs";
+import { newClientId } from "../clientId";
+import {
+  CONTINUE_FLOW_HINT_TEXT,
+  REWORK_FLOW_HINT_TEXT,
+  continueFlowFor,
+  runHasSessionRefs,
+  type ContinueFlowKind,
+} from "../continueGuard";
 import copyIdIcon from "../assets/figma-taskboard/copy-id.svg";
 import copyLinkIcon from "../assets/figma-taskboard/copy-link.svg";
 import { DescriptionDocument } from "./DescriptionDocument";
 
-type TaskDetailError = string | readonly [string, string];
+type TaskDetailError = string | readonly [string, string, string?];
 
 interface TaskDetailProps {
   task: Task;
@@ -108,9 +124,16 @@ interface TaskDetailProps {
   developmentScanLoading: boolean;
   commentsRevision: number;
   attachmentsRevision: number;
+  // DBG-08: a board move needed the continue flow; each new value focuses the composer and shows a hint.
+  continueRequest?: number;
+  // Which flow that request opens: "continue" (message → same AI session) or "rework" (no session to continue).
+  continueRequestFlow?: ContinueFlowKind;
   onCreateLabel: (label: string) => Promise<void>;
   onDeleteLabel: (label: string) => Promise<void>;
   onUpdate: (task: Task, changes: Partial<TaskDraft>) => Promise<Task>;
+  // v2: the task returned by a run API call (rework / continue), so the board can update without a PATCH.
+  // Optional; without it the board relies on the server's task.moved event.
+  onTaskChanged?: (task: Task) => void;
   onOpenTask: (task: TaskRelationSummary) => void;
   onAddRelation: (
     task: Task,
@@ -133,6 +156,8 @@ interface TaskDetailProps {
 }
 
 function messageFor(error: unknown): TaskDetailError {
+  const known = runErrorTextPair(error);
+  if (known) return [known[0], known[1]];
   if (error instanceof ApiError) return error.message;
   if (error instanceof Error) return error.message;
   return ["操作未完成，请重试。", "The action could not be completed. Try again."];
@@ -207,7 +232,7 @@ function contextValue(context: DevelopmentContext | null): string {
 
 function contextLabel(
   context: DevelopmentContext,
-  text: (chinese: string, english: string) => string,
+  text: (chinese: string, english: string, taiwanese?: string) => string,
 ): string {
   if (context.type === "branch") return context.branch;
   const folder = context.path.split(/[\\/]/).filter(Boolean).at(-1) ?? context.path;
@@ -242,11 +267,11 @@ function activityValue(
   value: unknown,
   language: TaskboardLanguage,
   locale: string,
-  text: (chinese: string, english: string) => string,
+  text: (chinese: string, english: string, taiwanese?: string) => string,
 ): string {
   if (field === "archivedAt") {
     return typeof value === "string"
-      ? text(`已归档（${exactTime(value, locale)}）`, `Archived (${exactTime(value, locale)})`)
+      ? text(`已归档（${exactTime(value, locale)}）`, `Archived (${exactTime(value, locale)})`, `已封存（${exactTime(value, locale)}）`)
       : text("未归档", "Not archived");
   }
   if (value === null || value === "") return text("未设置", "Not set");
@@ -258,7 +283,7 @@ function activityValue(
   }
   if (field === "labels" && Array.isArray(value)) {
     return value.length > 0
-      ? value.join(language === "zh" ? "、" : ", ")
+      ? value.join(isChineseLanguage(language) ? "、" : ", ")
       : text("无标签", "No labels");
   }
   if (field === "assignee" && typeof value === "object") {
@@ -295,7 +320,7 @@ function activityValue(
     const [chineseLabel, englishLabel] = RELATION_LABELS[relation.type];
     return `${text(chineseLabel, englishLabel)} ${relation.externalKey ?? relation.identifier} · ${relation.title}`;
   }
-  if (Array.isArray(value)) return value.join(language === "zh" ? "、" : ", ");
+  if (Array.isArray(value)) return value.join(isChineseLanguage(language) ? "、" : ", ");
   if (typeof value === "object") return JSON.stringify(value);
   return String(value);
 }
@@ -377,9 +402,12 @@ export function TaskDetail({
   developmentScanLoading,
   commentsRevision,
   attachmentsRevision,
+  continueRequest = 0,
+  continueRequestFlow = "continue",
   onCreateLabel,
   onDeleteLabel,
   onUpdate,
+  onTaskChanged,
   onOpenTask,
   onAddRelation,
   onRemoveRelation,
@@ -416,6 +444,11 @@ export function TaskDetail({
   );
   const [changeStatusToTodo, setChangeStatusToTodo] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [continuing, setContinuing] = useState(false);
+  const [continueHint, setContinueHint] = useState(false);
+  const [reworkHint, setReworkHint] = useState(false);
+  const [commentsReloadKey, setCommentsReloadKey] = useState(0);
+  const [runsRevision, setRunsRevision] = useState(0);
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingSegments, setEditingSegments] = useState<InlineMediaSegment[]>(
@@ -438,6 +471,8 @@ export function TaskDetail({
   const pendingCommentRef = useRef<{
     comment: Comment;
     uploadedAttachments: Map<string, Attachment>;
+    // True when the comment came from the single rework request (comment + move to todo).
+    reworked: boolean;
   } | null>(null);
   const editingUploadedAttachmentsRef = useRef<Map<string, Attachment>>(new Map());
   const draft = serializeInlineMedia(commentSegments);
@@ -447,6 +482,12 @@ export function TaskDetail({
   const displayIdentifier = currentTask.externalKey ?? currentTask.identifier;
   const editingInlineImages = inlineMediaImages(editingSegments);
   const editingInlineFiles = inlineMediaFiles(editingSegments);
+  const activeRun = isActiveTaskRun(currentTask.activeRun) ? currentTask.activeRun : null;
+  const hasRunHistory = Boolean(activeRun || currentTask.latestRun);
+  // in_review/blocked cards that an AI worked on: continue and rework go through the run API.
+  const reviewableRun = !activeRun
+    && (currentTask.status === "in_review" || currentTask.status === "blocked")
+    && Boolean(currentTask.latestRun);
 
   useEffect(() => {
     const taskChanged = currentTask.id !== task.id;
@@ -465,6 +506,24 @@ export function TaskDetail({
   useEffect(() => {
     resizeTextarea(titleRef.current);
   }, [title]);
+
+  useEffect(() => {
+    if (continueRequest <= 0) return;
+    if (continueRequestFlow === "rework") showReworkHint();
+    else showContinueHint();
+    // The board opened this flow (its guard or a server refusal); if this copy of the card is stale and
+    // does not show the previous run yet, reload it so the hint and the continue / rework actions appear.
+    if (!reviewableRun) {
+      void getTask(currentTask.id).then((fresh) => setCurrentTask(fresh)).catch(() => {});
+    }
+  }, [continueRequest]);
+
+  useEffect(() => {
+    if (!reviewableRun) {
+      setContinueHint(false);
+      setReworkHint(false);
+    }
+  }, [reviewableRun]);
 
   useLayoutEffect(() => {
     if (!editingDescription) return;
@@ -517,7 +576,7 @@ export function TaskDetail({
       },
     );
     return () => controller.abort();
-  }, [commentsRevision, task.activityKey, task.id]);
+  }, [commentsReloadKey, commentsRevision, task.activityKey, task.id]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -613,7 +672,7 @@ export function TaskDetail({
       return;
     }
 
-    const requestId = crypto.randomUUID();
+    const requestId = newClientId();
     const rect = input.getBoundingClientRect();
     function receiveDate(event: MessageEvent) {
       if (event.source !== window.parent || event.data?.type !== "taskboard:date-picker-response") return;
@@ -823,29 +882,58 @@ export function TaskDetail({
     setSubmitting(true);
     setCommentsError(null);
     try {
+      // Rework = comment + move back to todo through the run API (it refuses a card with an active run).
+      const reworkRequested = reviewableRun && changeStatusToTodo;
       if (!pendingCommentRef.current) {
-        pendingCommentRef.current = {
-          comment: await createComment(task.id, body),
-          uploadedAttachments: new Map(),
-        };
+        const hasPendingFiles = commentInlineImages.length > 0 || commentInlineFiles.length > 0;
+        if (reworkRequested && !hasPendingFiles) {
+          // One request: nothing is written when it is refused.
+          const reworked = await reworkTask(task.id, body);
+          setCurrentTask(reworked.task);
+          onTaskChanged?.(reworked.task);
+          pendingCommentRef.current = {
+            comment: reworked.comment,
+            uploadedAttachments: new Map(),
+            reworked: true,
+          };
+        } else {
+          // DBG-09: with attachments the card must not reach todo (where auto-claim can start the AI)
+          // before the files exist, so post the comment, upload, then rework({ commentId }).
+          pendingCommentRef.current = {
+            comment: await createComment(task.id, body),
+            uploadedAttachments: new Map(),
+            reworked: false,
+          };
+        }
       }
-      const { comment, uploadedAttachments } = pendingCommentRef.current;
+      const pendingComment = pendingCommentRef.current;
+      const { uploadedAttachments } = pendingComment;
       const pending = [...commentInlineImages, ...commentInlineFiles];
       const uploaded: Attachment[] = [];
       for (const item of pending) {
         let attachment = uploadedAttachments.get(item.id);
         if (!attachment) {
           attachment = await uploadCommentAttachment(
-            comment.id, item.file, item.type === "pending-image" ? "inline" : "attachment",
+            pendingComment.comment.id, item.file, item.type === "pending-image" ? "inline" : "attachment",
           );
           uploadedAttachments.set(item.id, attachment);
         }
         uploaded.push(attachment);
       }
       const resolvedBody = resolveInlineAttachments(body, pending, uploaded);
-      const nextComment = resolvedBody !== comment.body
-        ? await updateComment(comment, resolvedBody)
-        : comment;
+      if (resolvedBody !== pendingComment.comment.body) {
+        pendingComment.comment = await updateComment(pendingComment.comment, resolvedBody);
+      }
+      const nextComment = pendingComment.comment;
+      if (reworkRequested && !pendingComment.reworked) {
+        // A refusal (e.g. 403 without run control, 409 RUN_ALREADY_ACTIVE) keeps the draft and this
+        // pending comment, so a retry does not post or upload again.
+        const reworked = await reworkTask(task.id, { commentId: nextComment.id });
+        pendingComment.reworked = true;
+        setCurrentTask(reworked.task);
+        onTaskChanged?.(reworked.task);
+      }
+      const { reworked } = pendingComment;
       // This submission is complete before the existing status/mention work.
       pendingCommentRef.current = null;
       setComments((current) => current.some((item) => item.id === nextComment.id)
@@ -854,7 +942,11 @@ export function TaskDetail({
       setCommentSegments(createInlineMediaSegments());
       if (commentAttachmentInputRef.current) commentAttachmentInputRef.current.value = "";
       let relationAnchor = await getTask(currentTask.id);
-      if (changeStatusToTodo) {
+      if (reworked) {
+        setCurrentTask(relationAnchor);
+        setChangeStatusToTodo(false);
+        setReworkHint(false);
+      } else if (changeStatusToTodo) {
         const saved = await onUpdate(relationAnchor, { status: "todo" });
         setCurrentTask(saved);
         relationAnchor = saved;
@@ -867,6 +959,58 @@ export function TaskDetail({
       setCommentsError(messageFor(error));
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  function showContinueHint() {
+    setPropertyMenu(null);
+    setChangeStatusToTodo(false);
+    setReworkHint(false);
+    setContinueHint(true);
+    requestAnimationFrame(() => composerRef.current?.focus());
+  }
+
+  // DBG-08 follow-up: the last run never reached an AI session, so there is nothing to continue; prepare
+  // the rework composer (comment + change status to todo) instead.
+  function showReworkHint() {
+    setPropertyMenu(null);
+    setContinueHint(false);
+    setChangeStatusToTodo(true);
+    setReworkHint(true);
+    requestAnimationFrame(() => composerRef.current?.focus());
+  }
+
+  async function continueWithComment() {
+    const body = draft.trim();
+    if (
+      !body
+      || !reviewableRun
+      || submitting
+      || changeStatusToTodo
+      || pendingCommentRef.current
+      || commentInlineImages.length > 0
+      || commentInlineFiles.length > 0
+    ) return;
+    const segments = commentSegments;
+    setSubmitting(true);
+    setContinuing(true);
+    setCommentsError(null);
+    try {
+      const result = await continueTask(currentTask.id, body);
+      setContinueHint(false);
+      setCurrentTask(result.task);
+      onTaskChanged?.(result.task);
+      setCommentSegments(createInlineMediaSegments());
+      setCommentsReloadKey((current) => current + 1);
+      setRunsRevision((current) => current + 1);
+      const savedWithRelations = await addMentionRelations(result.task, segments);
+      setCurrentTask(savedWithRelations);
+      requestAnimationFrame(() => composerRef.current?.focus());
+    } catch (error) {
+      setCommentsError(messageFor(error));
+    } finally {
+      setSubmitting(false);
+      setContinuing(false);
     }
   }
 
@@ -988,7 +1132,7 @@ export function TaskDetail({
     && currentTask.assignee.id === currentUser.id
     ? currentUser
     : currentTask.assignee;
-  const assigneeOptions = [displayAssignee, currentUser, CODEX_AGENT_ACTOR]
+  const assigneeOptions = [displayAssignee, currentUser, CODEX_AGENT_ACTOR, CLAUDE_AGENT_ACTOR]
     .filter((actor, index, actors) => (
       actors.findIndex((candidate) => actorKey(candidate) === actorKey(actor)) === index
     ));
@@ -1013,7 +1157,7 @@ export function TaskDetail({
   return (
     <section
       className="issue-detail"
-      aria-label={text(`${displayIdentifier} 议题详情`, `${displayIdentifier} issue details`)}
+      aria-label={text(`${displayIdentifier} 议题详情`, `${displayIdentifier} issue details`, `${displayIdentifier} 任務詳情`)}
     >
       <div className="issue-detail-scroll">
         <div className="issue-detail-layout">
@@ -1217,7 +1361,7 @@ export function TaskDetail({
                 <div className="attachments-error" role="alert">
                   {typeof attachmentsError === "string"
                     ? attachmentsError
-                    : text(attachmentsError[0], attachmentsError[1])}
+                    : text(attachmentsError[0], attachmentsError[1], attachmentsError[2])}
                 </div>
               )}
             </article>
@@ -1233,6 +1377,21 @@ export function TaskDetail({
                 () => onRemoveRelation(anchor, type, relatedTaskId),
               )}
             />
+
+            {hasRunHistory && (
+              <TaskRunPanel task={currentTask} revision={runsRevision}>
+                {activeRun && (
+                  <FollowupComposer
+                    task={currentTask}
+                    run={activeRun}
+                    onSent={() => {
+                      setRunsRevision((current) => current + 1);
+                      setCommentsReloadKey((current) => current + 1);
+                    }}
+                  />
+                )}
+              </TaskRunPanel>
+            )}
 
             <section className="activity-section" aria-labelledby="activity-heading">
               <header className="activity-heading">
@@ -1304,11 +1463,11 @@ export function TaskDetail({
                             <>{text("添加了 ", "added ")}<span className="activity-change-value">{afterValue}</span></>
                           ) : change.field === "relation" && change.after === null ? (
                             <>{text("移除了 ", "removed ")}<span className="activity-change-value">{beforeValue}</span></>
-                          ) : language === "zh" ? (
+                          ) : isChineseLanguage(language) ? (
                             <>
-                              将{fieldLabel}从
+                              {language === "zh-TW" ? "將" : "将"}{fieldLabel}{language === "zh-TW" ? "從" : "从"}
                               <span className="activity-change-value">{beforeValue}</span>
-                              改为
+                              {language === "zh-TW" ? "改為" : "改为"}
                               <span className="activity-change-value">{afterValue}</span>
                             </>
                           ) : (
@@ -1354,6 +1513,7 @@ export function TaskDetail({
                             title={text(
                               `编辑于 ${exactTime(comment.updatedAt, locale)}`,
                               `Edited ${exactTime(comment.updatedAt, locale)}`,
+                              `編輯於 ${exactTime(comment.updatedAt, locale)}`,
                             )}
                           >
                             {text("已编辑", "Edited")}
@@ -1510,7 +1670,19 @@ export function TaskDetail({
                 <div className="comments-error" role="alert">
                   {typeof commentsError === "string"
                     ? commentsError
-                    : text(commentsError[0], commentsError[1])}
+                    : text(commentsError[0], commentsError[1], commentsError[2])}
+                </div>
+              )}
+
+              {continueHint && reviewableRun && (
+                <div className="comments-error comment-continue-hint" role="status">
+                  {text(CONTINUE_FLOW_HINT_TEXT[0], CONTINUE_FLOW_HINT_TEXT[1])}
+                </div>
+              )}
+
+              {reworkHint && reviewableRun && (
+                <div className="comments-error comment-continue-hint" role="status">
+                  {text(REWORK_FLOW_HINT_TEXT[0], REWORK_FLOW_HINT_TEXT[1])}
                 </div>
               )}
 
@@ -1579,6 +1751,28 @@ export function TaskDetail({
                         <span aria-hidden="true" />
                       </button>
                     </div>
+                    {reviewableRun && runHasSessionRefs(currentTask.latestRun) && (
+                      <button
+                        className="button secondary comment-continue-button"
+                        type="button"
+                        disabled={
+                          !draft.trim()
+                          || submitting
+                          || changeStatusToTodo
+                          || commentInlineImages.length > 0
+                          || commentInlineFiles.length > 0
+                        }
+                        title={commentInlineImages.length > 0 || commentInlineFiles.length > 0
+                          ? text("「繼續」只能送出文字，請先移除附件。", "Continue sends text only. Remove attachments first.")
+                          : text(
+                            "把這段留言送給 AI，在同一個對話繼續處理",
+                            "Send this comment to the AI and continue in the same conversation",
+                          )}
+                        onClick={() => void continueWithComment()}
+                      >
+                        {continuing ? text("送出中…", "Sending…") : text("繼續", "Continue")}
+                      </button>
+                    )}
                     <button
                       className="button primary"
                       type="submit"
@@ -1588,7 +1782,7 @@ export function TaskDetail({
                         && commentInlineFiles.length === 0
                       ) || submitting}
                     >
-                      {submitting ? text("发布中…", "Posting…") : text("评论", "Comment")}
+                      {submitting && !continuing ? text("发布中…", "Posting…") : text("评论", "Comment")}
                     </button>
                   </div>
                 </footer>
@@ -1628,10 +1822,11 @@ export function TaskDetail({
                 title={text(
                   `复制议题 ID ${displayIdentifier}`,
                   `Copy issue ID ${displayIdentifier}`,
+                  `複製任務 ID ${displayIdentifier}`,
                 )}
                 onClick={() => onCopy(
                   displayIdentifier,
-                  text(`${displayIdentifier} 已复制。`, `${displayIdentifier} copied.`),
+                  text(`${displayIdentifier} 已复制。`, `${displayIdentifier} copied.`, `${displayIdentifier} 已複製。`),
                 )}
               >
                 <span className="detail-copy-action-icon" aria-hidden="true"><img src={copyIdIcon} alt="" /></span>
@@ -1653,6 +1848,9 @@ export function TaskDetail({
                 <span className="detail-copy-action-icon" aria-hidden="true"><img src={copyLinkIcon} alt="" /></span>
                 <span className="detail-copy-action-label">{text("复制链接", "Copy link")}</span>
               </button>
+              {currentTask.source !== "jira" && (
+                <CreateFollowupTaskButton task={currentTask} onOpenTask={onOpenTask} />
+              )}
             </div>
             <h2>{text("属性", "Properties")}</h2>
             <div className="detail-property-row">
@@ -1680,7 +1878,19 @@ export function TaskDetail({
                 )}
                 ariaLabel={text("状态", "Status")}
                 onOpenChange={(open) => setPropertyMenu(open ? "status" : null)}
-                onChange={(status) => void saveTask({ status }, "status")}
+                onChange={(status) => {
+                  // DBG-08: back to in_progress continues the AI with a message instead of a plain move.
+                  const flow = continueFlowFor(currentTask, status);
+                  if (flow === "rework") {
+                    showReworkHint();
+                    return;
+                  }
+                  if (flow) {
+                    showContinueHint();
+                    return;
+                  }
+                  void saveTask({ status }, "status");
+                }}
               />
             </div>
             <div className="detail-property-row">
@@ -1859,10 +2069,12 @@ export function TaskDetail({
               <span>{text(
                 `创建于 ${exactTime(currentTask.createdAt, locale)}`,
                 `Created ${exactTime(currentTask.createdAt, locale)}`,
+                `建立於 ${exactTime(currentTask.createdAt, locale)}`,
               )}</span>
               {currentTask.updatedAt !== currentTask.createdAt && <span>{text(
                 `更新于 ${exactTime(currentTask.updatedAt, locale)}`,
                 `Updated ${exactTime(currentTask.updatedAt, locale)}`,
+                `更新於 ${exactTime(currentTask.updatedAt, locale)}`,
               )}</span>}
             </div>
           </aside>

@@ -1,0 +1,11 @@
+/* v2: Claude agent avatar mark (see CLAUDE_AGENT_MARK_SVG in ActorAvatar.tsx). */
+.actor-avatar-claude .actor-avatar-agent-image,
+.gantt-bar-assignee .actor-claude-mark {
+  display: block;
+}
+
+.actor-claude-mark {
+  display: block;
+  width: 100%;
+  height: 100%;
+}

@@ -48,6 +48,8 @@ use tauri::{
     tray::TrayIconBuilder,
     AppHandle, Emitter, Manager,
 };
+#[cfg(not(target_os = "macos"))]
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_updater::{Update, UpdaterExt};
@@ -56,7 +58,7 @@ use uuid::Uuid;
 use windows::{
     core::PWSTR,
     Win32::{
-        Foundation::{CloseHandle, ERROR_SUCCESS, FILETIME, WAIT_OBJECT_0},
+        Foundation::{CloseHandle, ERROR_SUCCESS, FILETIME, WAIT_OBJECT_0, WAIT_TIMEOUT},
         System::{
             RestartManager::{
                 RmEndSession, RmRegisterResources, RmShutdown, RmStartSession, CCH_RM_SESSION_KEY,
@@ -70,13 +72,31 @@ use windows::{
     },
 };
 
+mod board_window;
+#[cfg(target_os = "windows")]
+mod windows_job;
+
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 const LAUNCHER_STOP_TIMEOUT: Duration = Duration::from_secs(36);
+#[cfg(not(target_os = "windows"))]
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
+// Amendment 11: Windows checks the configured shared update folder 30 s after start and every 6 hours.
+#[cfg(target_os = "windows")]
+const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+#[cfg(target_os = "windows")]
+const SHARED_UPDATE_FIRST_CHECK_DELAY: Duration = Duration::from_secs(30);
+#[cfg(target_os = "windows")]
+const SHARED_UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(90);
+#[cfg(target_os = "windows")]
+const SHARED_UPDATE_PREPARE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+#[cfg(target_os = "windows")]
+static DECLINED_SHARED_UPDATE: Mutex<Option<String>> = Mutex::new(None);
 const BETA_UPDATER_ENDPOINT: &str =
-    "https://raw.githubusercontent.com/chuspeeism/dashi-taskboard/beta-updater/latest.json";
-// Unique whole-directory snapshots shipped from app-v0.2.0 through v1.1.2.
+    "https://raw.githubusercontent.com/brianfan0418/automate-taskboard/beta-updater/latest.json";
+// Unique whole-directory snapshots shipped from app-v0.2.0 through v1.1.2 (inherited from Dashi).
+// The legacy location checked below is AutoMate-specific, so Dashi's own
+// ~/.codex/skills/manage-taskboard is never removed or moved by this launcher.
 const KNOWN_TASKBOARD_SKILL_DIGESTS: [&str; 6] = [
     "eeaaa5d71a2c47688bf62a5eb9f45e9138fe49eb636a46cfd6af8a0f8853e2e0",
     "c4ce3257bbf3efed1bb4d2d9f26436be8ba835d4ab4adf6fed38f5abbedafa59",
@@ -85,7 +105,7 @@ const KNOWN_TASKBOARD_SKILL_DIGESTS: [&str; 6] = [
     "27131c82ac63c2884c1fcb7dd22a4e1c75975c7d79eb3fa3483a7949dd5f284d",
     "ae74aec793decf6d9013c36f4b53e01723796a45567b77e9e9f22b4a168d3fbe",
 ];
-const TASKBOARD_PREFERRED_PORT: u16 = 47823;
+const TASKBOARD_PREFERRED_PORT: u16 = 47833;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 const TASKBOARD_LISTEN_FD: i32 = 5;
 #[cfg(target_os = "macos")]
@@ -145,6 +165,35 @@ enum LauncherEvent {
     OpenSignalQueued,
     OpenedInExistingCodex,
     Injected,
+    CodexNotAttached,
+}
+
+/// Amendment 14 (product decision 2.0.2): starting the launcher never launches or restarts the
+/// Codex App. `AttachOnly` injects the sidebar only into a Codex that already runs with a reachable
+/// CDP renderer and otherwise leaves Codex alone (the tray 「在 Codex 開啟任務面板」 may still
+/// start it on request). `Relaunch` is the explicit tray 「重新開啟 Codex」 path.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CodexStart {
+    AttachOnly,
+    Relaunch,
+}
+
+/// Arguments for the injector. `--launch-on-request` keeps the injector from starting Codex until
+/// an explicit open request.
+fn injector_codex_args(codex_start: CodexStart) -> &'static [&'static str] {
+    match codex_start {
+        CodexStart::AttachOnly => &["--launch-on-request"],
+        CodexStart::Relaunch => &[],
+    }
+}
+
+/// Amendment 14: the launcher is a GUI process, so a console program (powershell, taskkill, node…)
+/// started without CREATE_NO_WINDOW opens a visible console window.
+#[cfg(target_os = "windows")]
+fn windows_command(program: impl AsRef<std::ffi::OsStr>) -> StdCommand {
+    let mut command = StdCommand::new(program);
+    command.creation_flags(CREATE_NO_WINDOW.0);
+    command
 }
 
 struct LauncherState {
@@ -163,6 +212,9 @@ struct LauncherState {
     codex_port: Mutex<Option<u16>>,
     #[cfg(target_os = "windows")]
     child_control: Mutex<Option<ChildStdin>>,
+    // Amendment 14: (service child PID, the Job Object holding that service tree).
+    #[cfg(target_os = "windows")]
+    service_job: Mutex<Option<(u32, Arc<windows_job::ServiceJob>)>>,
     _instance_lock: File,
     data_directory: PathBuf,
     log_path: PathBuf,
@@ -184,7 +236,7 @@ struct UpdateDialogTargetIvars {
 #[cfg(target_os = "macos")]
 define_class!(
     #[unsafe(super = NSObject)]
-    #[name = "CodexTaskboardUpdateDialogTarget"]
+    #[name = "AutomateTaskboardUpdateDialogTarget"]
     #[thread_kind = MainThreadOnly]
     #[ivars = UpdateDialogTargetIvars]
     struct UpdateDialogTarget;
@@ -239,7 +291,7 @@ struct UpdateDialog {
 impl UpdateDialog {
     fn prompt(_app: &AppHandle, version: &str) -> Option<Self> {
         let message = format!(
-            "发现新版本 Codex Taskboard {version}。是否现在更新并重启？"
+            "發現新版本 AutoMate Taskboard {version}。是否現在更新並重新啟動？"
         );
         let (response, result) = std::sync::mpsc::channel();
         let dialog = run_on_main(move |mtm| {
@@ -252,10 +304,10 @@ impl UpdateDialog {
             progress_indicator.setFrameSize(NSSize::new(280.0, 20.0));
             progress_indicator.sizeToFit();
             progress_indicator.setDisplayedWhenStopped(true);
-            alert.setMessageText(&NSString::from_str("Codex Taskboard 更新"));
+            alert.setMessageText(&NSString::from_str("AutoMate Taskboard 更新"));
             alert.setInformativeText(&NSString::from_str(&message));
             let install_button = alert.addButtonWithTitle(&NSString::from_str("立即更新"));
-            let defer_button = alert.addButtonWithTitle(&NSString::from_str("稍后"));
+            let defer_button = alert.addButtonWithTitle(&NSString::from_str("稍後"));
             unsafe {
                 install_button.setTarget(Some(&target));
                 install_button.setAction(Some(sel!(acceptUpdate:)));
@@ -359,13 +411,13 @@ impl UpdateDialog {
     fn prompt(app: &AppHandle, version: &str) -> Option<Self> {
         app.dialog()
             .message(format!(
-                "发现新版本 Codex Taskboard {version}。是否现在更新并重启？"
+                "發現新版本 AutoMate Taskboard {version}。是否現在更新並重新啟動？"
             ))
-            .title("Codex Taskboard 更新")
+            .title("AutoMate Taskboard 更新")
             .kind(MessageDialogKind::Info)
             .buttons(MessageDialogButtons::OkCancelCustom(
                 "立即更新".into(),
-                "稍后".into(),
+                "稍後".into(),
             ))
             .blocking_show()
             .then_some(Self)
@@ -406,8 +458,8 @@ impl LauncherState {
             child: Mutex::new(None),
             snapshot: Mutex::new(LauncherSnapshot {
                 phase: "starting".into(),
-                message: "正在启动任务面板…".into(),
-                update_message: "启动后将自动检查更新。".into(),
+                message: "正在啟動任務面板…".into(),
+                update_message: "啟動後將自動檢查更新。".into(),
                 update_available: false,
                 version,
                 app_path: None,
@@ -428,10 +480,12 @@ impl LauncherState {
             codex_port: Mutex::new(None),
             #[cfg(target_os = "windows")]
             child_control: Mutex::new(None),
+            #[cfg(target_os = "windows")]
+            service_job: Mutex::new(None),
             _instance_lock: instance_lock,
             pid_record_path: data_directory.join("launcher-child.json"),
             data_directory,
-            log_path: log_directory.join("codex-taskboard-launcher.log"),
+            log_path: log_directory.join("automate-taskboard-launcher.log"),
         }
     }
 }
@@ -475,14 +529,14 @@ fn append_macos_startup_log(line: &str) {
     let Some(home_directory) = std::env::var_os("HOME").map(PathBuf::from) else {
         return;
     };
-    let log_directory = home_directory.join("Library/Logs/Codex Taskboard");
+    let log_directory = home_directory.join("Library/Logs/AutoMate Taskboard");
     if fs::create_dir_all(&log_directory).is_err() {
         return;
     }
     if let Ok(mut file) = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(log_directory.join("codex-taskboard-launcher.log"))
+        .open(log_directory.join("automate-taskboard-launcher.log"))
     {
         let _ = writeln!(file, "{line}");
     }
@@ -493,10 +547,10 @@ fn wait_for_macos_bundle_migration_lock() -> Result<File, String> {
     let home_directory = std::env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or_else(|| "HOME is unavailable".to_string())?;
-    let data_directory = home_directory.join("Library/Application Support/Codex Taskboard");
+    let data_directory = home_directory.join("Library/Application Support/AutoMate Taskboard");
     fs::create_dir_all(&data_directory).map_err(|error| {
         format!(
-            "无法创建应用数据目录 {}：{error}",
+            "無法建立應用程式資料目錄 {}：{error}",
             data_directory.display()
         )
     })?;
@@ -508,13 +562,13 @@ fn wait_for_macos_bundle_migration_lock() -> Result<File, String> {
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(100)),
             Ok(None) => {
                 return Err(format!(
-                    "等待现有 App 退出超时，无法迁移 {}",
+                    "等待現有 App 結束超時，無法遷移 {}",
                     lock_path.display()
                 ));
             }
             Err(error) => {
                 return Err(format!(
-                    "无法锁定 App 迁移路径 {}：{error}",
+                    "無法鎖定 App 遷移路徑 {}：{error}",
                     lock_path.display()
                 ));
             }
@@ -529,7 +583,7 @@ fn rename_macos_app_bundle(source: &Path, destination: &Path) -> Result<(), Stri
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {}
         Err(error) => {
             return Err(format!(
-                "无法将 {} 改名为 {}：{error}",
+                "無法將 {} 改名為 {}：{error}",
                 source.display(),
                 destination.display()
             ));
@@ -547,18 +601,18 @@ end run"#;
         .arg(source)
         .arg(destination)
         .output()
-        .map_err(|error| format!("无法请求 App 改名授权：{error}"))?;
+        .map_err(|error| format!("無法請求 App 改名授權：{error}"))?;
     if !output.status.success() {
         let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(if detail.is_empty() {
-            "App 改名授权未完成".into()
+            "App 改名授權未完成".into()
         } else {
-            format!("App 改名授权未完成：{detail}")
+            format!("App 改名授權未完成：{detail}")
         });
     }
     if source.exists() || !destination.is_dir() {
         return Err(format!(
-            "App 改名后路径状态不正确：{} -> {}",
+            "App 改名後路徑狀態不正確：{} -> {}",
             source.display(),
             destination.display()
         ));
@@ -580,28 +634,28 @@ fn take_macos_bundle_migration_marker() -> Result<Option<MacosBundleMigration>, 
     let beta_autostart_was_enabled =
         beta_autostart_marker.as_deref() == Some(std::ffi::OsStr::new("1"));
     if !is_beta_release() {
-        return Err("稳定版不能恢复 Beta App bundle migration marker".into());
+        return Err("穩定版不能恢復 Beta App bundle migration marker".into());
     }
 
     let current_executable =
-        std::env::current_exe().map_err(|error| format!("无法定位当前可执行文件：{error}"))?;
+        std::env::current_exe().map_err(|error| format!("無法定位目前執行檔：{error}"))?;
     let current_executable = fs::canonicalize(&current_executable)
-        .map_err(|error| format!("无法解析当前可执行文件路径：{error}"))?;
+        .map_err(|error| format!("無法解析目前執行檔路徑：{error}"))?;
     let current_app = macos_app_path_from_executable(&current_executable)
-        .ok_or_else(|| "当前可执行文件不在 macOS App bundle 内".to_string())?;
-    if current_app.file_name() != Some(std::ffi::OsStr::new("Codex Taskboard Beta.app")) {
+        .ok_or_else(|| "目前執行檔不在 macOS App bundle 內".to_string())?;
+    if current_app.file_name() != Some(std::ffi::OsStr::new("AutoMate Taskboard Beta.app")) {
         return Err(format!(
-            "macOS App bundle migration marker 只能由改名后的 Beta App 恢复：{}",
+            "macOS App bundle migration marker 只能由改名後的 Beta App 恢復：{}",
             current_app.display()
         ));
     }
     let relative_executable = current_executable
         .strip_prefix(&current_app)
-        .map_err(|error| format!("无法解析 Beta App 可执行文件相对路径：{error}"))?;
+        .map_err(|error| format!("無法解析 Beta App 執行檔相對路徑：{error}"))?;
     let expected_source_executable = current_app
         .parent()
-        .ok_or_else(|| format!("无法定位 App 上级目录：{}", current_app.display()))?
-        .join("Codex Taskboard.app")
+        .ok_or_else(|| format!("無法定位 App 上級目錄：{}", current_app.display()))?
+        .join("AutoMate Taskboard.app")
         .join(relative_executable);
     if source_executable != expected_source_executable {
         return Err(format!(
@@ -627,28 +681,28 @@ fn migrate_macos_beta_app_bundle_name() -> Result<Option<MacosBundleMigration>, 
     }
 
     let current_executable =
-        std::env::current_exe().map_err(|error| format!("无法定位当前可执行文件：{error}"))?;
+        std::env::current_exe().map_err(|error| format!("無法定位目前執行檔：{error}"))?;
     let current_executable = fs::canonicalize(&current_executable)
-        .map_err(|error| format!("无法解析当前可执行文件路径：{error}"))?;
+        .map_err(|error| format!("無法解析目前執行檔路徑：{error}"))?;
     let Some(current_app) = macos_app_path_from_executable(&current_executable) else {
         return Ok(None);
     };
-    if current_app.file_name() == Some(std::ffi::OsStr::new("Codex Taskboard Beta.app")) {
+    if current_app.file_name() == Some(std::ffi::OsStr::new("AutoMate Taskboard Beta.app")) {
         return Ok(None);
     }
-    if current_app.file_name() != Some(std::ffi::OsStr::new("Codex Taskboard.app")) {
+    if current_app.file_name() != Some(std::ffi::OsStr::new("AutoMate Taskboard.app")) {
         return Err(format!(
-            "Beta App 当前路径名称不受支持：{}",
+            "Beta App 目前路徑名稱不受支援：{}",
             current_app.display()
         ));
     }
     let destination_app = current_app
         .parent()
-        .ok_or_else(|| format!("无法定位 App 上级目录：{}", current_app.display()))?
-        .join("Codex Taskboard Beta.app");
+        .ok_or_else(|| format!("無法定位 App 上級目錄：{}", current_app.display()))?
+        .join("AutoMate Taskboard Beta.app");
     let executable_name = current_executable
         .file_name()
-        .ok_or_else(|| format!("无法定位 App 可执行文件名：{}", current_executable.display()))?
+        .ok_or_else(|| format!("無法定位 App 執行檔名：{}", current_executable.display()))?
         .to_owned();
     let destination_executable = destination_app
         .join("Contents/MacOS")
@@ -665,17 +719,17 @@ fn migrate_macos_beta_app_bundle_name() -> Result<Option<MacosBundleMigration>, 
         } < 0
     {
         return Err(format!(
-            "无法设置 App 迁移锁：{}",
+            "無法設定 App 遷移鎖：{}",
             std::io::Error::last_os_error()
         ));
     }
 
     if !current_app.is_dir() {
-        return Err(format!("当前 App 路径不存在：{}", current_app.display()));
+        return Err(format!("目前 App 路徑不存在：{}", current_app.display()));
     }
     if destination_app.exists() {
         return Err(format!(
-            "目标 App 路径已存在，未覆盖：{}",
+            "目標 App 路徑已存在，未覆蓋：{}",
             destination_app.display()
         ));
     }
@@ -683,7 +737,7 @@ fn migrate_macos_beta_app_bundle_name() -> Result<Option<MacosBundleMigration>, 
         .map(PathBuf::from)
         .ok_or_else(|| "HOME is unavailable".to_string())?;
     let beta_autostart_was_enabled = home_directory
-        .join("Library/LaunchAgents/Codex Taskboard Beta.plist")
+        .join("Library/LaunchAgents/AutoMate Taskboard Beta.plist")
         .is_file();
     let beta_autostart_marker = if beta_autostart_was_enabled { "1" } else { "0" };
 
@@ -706,7 +760,7 @@ fn migrate_macos_beta_app_bundle_name() -> Result<Option<MacosBundleMigration>, 
 
     match rename_macos_app_bundle(&destination_app, &current_app) {
         Ok(()) => Err(format!(
-            "无法从改名后的 App 重启，已恢复原路径：{exec_error}"
+            "無法從改名後的 App 重新啟動，已恢復原路徑：{exec_error}"
         )),
         Err(rollback_error) => {
             append_macos_startup_log(&format!(
@@ -795,7 +849,7 @@ fn reconcile_legacy_skill(
     home_directory: &Path,
     bundled_skill: &Path,
 ) -> Result<Option<(PathBuf, PathBuf)>, std::io::Error> {
-    let legacy_skill = home_directory.join(".codex/skills/manage-taskboard");
+    let legacy_skill = home_directory.join(".codex/skills/manage-automate-taskboard");
     let metadata = match fs::symlink_metadata(&legacy_skill) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -822,7 +876,7 @@ fn reconcile_legacy_skill(
 
     let backup_path = home_directory
         .join(".codex/taskboard-skill-backups")
-        .join(format!("manage-taskboard-{}", Uuid::new_v4()));
+        .join(format!("manage-automate-taskboard-{}", Uuid::new_v4()));
     Ok(Some((legacy_skill, backup_path)))
 }
 
@@ -834,14 +888,14 @@ fn resolve_legacy_skill_conflict(
     let proceed = app
         .dialog()
         .message(format!(
-            "检测到旧位置中的 manage-taskboard Skill 与当前 App 内置版本不同，可能包含你的修改。\n\n为避免 Codex 同时发现两个版本，Taskboard 会把旧副本完整保留到：\n\n{}\n\n选择退出不会改动旧副本，也不会启动 Codex。",
+            "偵測到舊位置中的 manage-automate-taskboard Skill 與目前 App 內建版本不同，可能包含你的修改。\n\n為避免 Codex 同時發現兩個版本，Taskboard 會把舊副本完整保留到：\n\n{}\n\n選擇結束不會改動舊副本，也不會啟動 Codex。",
             backup_path.display()
         ))
-        .title("Codex Taskboard Skill 冲突")
+        .title("AutoMate Taskboard Skill 衝突")
         .kind(MessageDialogKind::Warning)
         .buttons(MessageDialogButtons::OkCancelCustom(
-            "保留备份并继续".into(),
-            "退出".into(),
+            "保留備份並繼續".into(),
+            "結束".into(),
         ))
         .blocking_show();
     if !proceed {
@@ -920,9 +974,9 @@ fn update_snapshot(
             let status = {
                 let snapshot = status_state.snapshot.lock().unwrap();
                 match snapshot.phase.as_str() {
-                    "running" => "运行状态：正常",
-                    "error" => "运行状态：异常",
-                    _ => "运行状态：启动中",
+                    "running" => "執行狀態：正常",
+                    "error" => "執行狀態：異常",
+                    _ => "執行狀態：啟動中",
                 }
             };
             let _ = status_menu.set_text(status);
@@ -947,7 +1001,7 @@ fn show_error_dialog(app: &AppHandle, title: &str, message: &str) {
         .message(message)
         .title(title)
         .kind(MessageDialogKind::Error)
-        .buttons(MessageDialogButtons::OkCustom("关闭".into()))
+        .buttons(MessageDialogButtons::OkCustom("關閉".into()))
         .blocking_show();
 }
 
@@ -981,7 +1035,7 @@ fn sync_macos_autostart_path(
     }
 
     let launch_agents = home_directory.join("Library/LaunchAgents");
-    let stable_entry = launch_agents.join("Codex Taskboard.plist");
+    let stable_entry = launch_agents.join("AutoMate Taskboard.plist");
     let migrate_stable_entry = macos_launch_agent_executable(&stable_entry).as_deref()
         == Some(migration.source_executable.as_path());
 
@@ -990,7 +1044,7 @@ fn sync_macos_autostart_path(
     }
     app.autolaunch()
         .enable()
-        .map_err(|error| format!("无法更新 Beta 开机自启动路径：{error}"))?;
+        .map_err(|error| format!("無法更新 Beta 開機自動啟動路徑：{error}"))?;
     if !migrate_stable_entry {
         return Ok(());
     }
@@ -998,7 +1052,7 @@ fn sync_macos_autostart_path(
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(format!(
-            "无法移除已迁移的开机自启动项 {}：{error}",
+            "無法移除已遷移的開機自動啟動項 {}：{error}",
             stable_entry.display()
         )),
     }
@@ -1009,45 +1063,46 @@ fn install_taskctl_symlink(app: &AppHandle) -> Result<(PathBuf, PathBuf), String
     let wrapper_path = app
         .path()
         .resource_dir()
-        .map_err(|error| format!("无法定位当前 App 资源目录：{error}"))?
+        .map_err(|error| format!("無法定位目前 App 資源目錄：{error}"))?
         .join("bin/taskctl");
     let wrapper_path = fs::canonicalize(&wrapper_path).map_err(|error| {
         format!(
-            "无法定位当前 App 内置命令行工具 {}：{error}",
+            "無法定位目前 App 內建命令列工具 {}：{error}",
             wrapper_path.display()
         )
     })?;
     if !wrapper_path.is_file() {
         return Err(format!(
-            "当前 App 内置命令行工具不是文件：{}",
+            "目前 App 內建命令列工具不是檔案：{}",
             wrapper_path.display()
         ));
     }
 
-    let system_path = PathBuf::from("/opt/homebrew/bin/taskctl");
+    // Coexistence: Dashi "Codex Taskboard" owns /opt/homebrew/bin/taskctl, so use a distinct name.
+    let system_path = PathBuf::from("/opt/homebrew/bin/automate-taskctl");
     let temporary_path = system_path.with_file_name(format!(
-        ".taskctl-codex-taskboard-{}.tmp",
+        ".taskctl-automate-taskboard-{}.tmp",
         Uuid::new_v4()
     ));
     std::os::unix::fs::symlink(&wrapper_path, &temporary_path).map_err(|error| {
         format!(
-            "无法在 {} 创建符号链接：{error}",
+            "無法在 {} 建立符號連結：{error}",
             system_path.parent().unwrap().display()
         )
     })?;
     if let Err(error) = fs::rename(&temporary_path, &system_path) {
         let _ = fs::remove_file(&temporary_path);
         return Err(format!(
-            "无法替换系统命令 {}：{error}",
+            "無法替換系統命令 {}：{error}",
             system_path.display()
         ));
     }
 
     let installed_target = fs::read_link(&system_path)
-        .map_err(|error| format!("无法验证系统命令 {}：{error}", system_path.display()))?;
+        .map_err(|error| format!("無法驗證系統命令 {}：{error}", system_path.display()))?;
     if installed_target != wrapper_path {
         return Err(format!(
-            "系统命令未指向当前 App：{} -> {}",
+            "系統命令未指向目前 App：{} -> {}",
             system_path.display(),
             installed_target.display()
         ));
@@ -1072,14 +1127,14 @@ fn find_codex_app(home_directory: &Path) -> Option<PathBuf> {
 fn ordinary_codex_process(app_path: &Path) -> Result<Option<u32>, String> {
     let app_name = app_path
         .file_stem()
-        .ok_or_else(|| "无法识别 Codex App 名称".to_string())?;
+        .ok_or_else(|| "無法識別 Codex App 名稱".to_string())?;
     let executable = app_path.join("Contents/MacOS").join(app_name);
     let output = StdCommand::new("/bin/ps")
         .args(["-ww", "-axo", "pid=,command="])
         .output()
         .map_err(|error| error.to_string())?;
     if !output.status.success() {
-        return Err("无法检查正在运行的 Codex".to_string());
+        return Err("無法檢查正在執行的 Codex".to_string());
     }
 
     let executable = executable.to_string_lossy();
@@ -1110,23 +1165,23 @@ fn process_is_running(pid: u32) -> bool {
 fn quit_codex_normally(pid: u32) -> Result<(), String> {
     let application =
         NSRunningApplication::runningApplicationWithProcessIdentifier(pid as libc::pid_t)
-            .ok_or_else(|| "无法找到正在运行的 Codex".to_string())?;
+            .ok_or_else(|| "無法找到正在執行的 Codex".to_string())?;
     if !application.terminate() {
-        return Err("Codex 没有接受退出请求".to_string());
+        return Err("Codex 沒有接受結束請求".to_string());
     }
     let deadline = Instant::now() + LAUNCHER_STOP_TIMEOUT;
     while process_is_running(pid) && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(100));
     }
     if process_is_running(pid) {
-        return Err("Codex 尚未退出，任务面板没有启动".to_string());
+        return Err("Codex 尚未結束，任務面板沒有啟動".to_string());
     }
     Ok(())
 }
 
 #[cfg(target_os = "windows")]
 fn find_codex_app(_home_directory: &Path) -> Option<PathBuf> {
-    let output = StdCommand::new("powershell.exe")
+    let output = windows_command("powershell.exe")
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -1145,21 +1200,26 @@ fn find_codex_app(_home_directory: &Path) -> Option<PathBuf> {
     candidate.is_file().then_some(candidate)
 }
 
+// Coexistence: a Codex root process that runs with its own `--user-data-dir` and a private CDP
+// channel is a launcher-managed instance. That covers this app's own profile and another
+// taskboard launcher's profile (for example Dashi "Codex Taskboard" under
+// %APPDATA%/Codex Taskboard/codex-profile), so AutoMate Taskboard never asks to quit a Codex it
+// does not own.
 #[cfg(target_os = "windows")]
 fn ordinary_codex_process(app_path: &Path, codex_profile: &Path) -> Result<Option<u32>, String> {
-    let output = StdCommand::new("powershell.exe")
+    let output = windows_command("powershell.exe")
         .args([
             "-NoProfile",
             "-NonInteractive",
             "-Command",
-            "$ErrorActionPreference = 'Stop'; $app = $env:CODEX_TASKBOARD_CODEX_APP_PATH; $profile = $env:CODEX_TASKBOARD_CODEX_PROFILE; $name = [IO.Path]::GetFileName($app); $all = @(Get-CimInstance Win32_Process -Filter \"Name = '$name'\" | Where-Object { $_.ExecutablePath -eq $app }); $pids = @{}; foreach ($item in $all) { $pids[[uint32]$item.ProcessId] = $true }; $process = $all | Where-Object { $command = [string]$_.CommandLine; $isRoot = -not $pids.ContainsKey([uint32]$_.ParentProcessId); $usesManagedProfile = $command.IndexOf('--user-data-dir', [StringComparison]::OrdinalIgnoreCase) -ge 0 -and $command.IndexOf($profile, [StringComparison]::OrdinalIgnoreCase) -ge 0; $usesPrivateCdp = $command.IndexOf('--remote-debugging-pipe', [StringComparison]::OrdinalIgnoreCase) -ge 0 -or $command.IndexOf('--remote-debugging-port', [StringComparison]::OrdinalIgnoreCase) -ge 0; $isManaged = $usesManagedProfile -and $usesPrivateCdp; $isRoot -and -not $isManaged } | Select-Object -First 1; if ($null -ne $process) { [Console]::Out.Write($process.ProcessId) }",
+            "$ErrorActionPreference = 'Stop'; $app = $env:CODEX_TASKBOARD_CODEX_APP_PATH; $profile = $env:CODEX_TASKBOARD_CODEX_PROFILE; $name = [IO.Path]::GetFileName($app); $all = @(Get-CimInstance Win32_Process -Filter \"Name = '$name'\" | Where-Object { $_.ExecutablePath -eq $app }); $pids = @{}; foreach ($item in $all) { $pids[[uint32]$item.ProcessId] = $true }; $process = $all | Where-Object { $command = [string]$_.CommandLine; $isRoot = -not $pids.ContainsKey([uint32]$_.ParentProcessId); $usesSeparateProfile = $command.IndexOf('--user-data-dir', [StringComparison]::OrdinalIgnoreCase) -ge 0; $usesPrivateCdp = $command.IndexOf('--remote-debugging-pipe', [StringComparison]::OrdinalIgnoreCase) -ge 0 -or $command.IndexOf('--remote-debugging-port', [StringComparison]::OrdinalIgnoreCase) -ge 0; $isManaged = $usesSeparateProfile -and $usesPrivateCdp; $isRoot -and -not $isManaged } | Select-Object -First 1; if ($null -ne $process) { [Console]::Out.Write($process.ProcessId) }",
         ])
         .env("CODEX_TASKBOARD_CODEX_APP_PATH", app_path)
         .env("CODEX_TASKBOARD_CODEX_PROFILE", codex_profile)
         .output()
         .map_err(|error| error.to_string())?;
     if !output.status.success() {
-        return Err("无法检查正在运行的 Codex".to_string());
+        return Err("無法檢查正在執行的 Codex".to_string());
     }
     let pid = String::from_utf8_lossy(&output.stdout);
     let pid = pid.trim();
@@ -1168,7 +1228,7 @@ fn ordinary_codex_process(app_path: &Path, codex_profile: &Path) -> Result<Optio
     }
     pid.parse()
         .map(Some)
-        .map_err(|_| "无法检查正在运行的 Codex".to_string())
+        .map_err(|_| "無法檢查正在執行的 Codex".to_string())
 }
 
 #[cfg(target_os = "windows")]
@@ -1197,7 +1257,7 @@ fn quit_codex_normally(pid: u32) -> Result<(), String> {
     .is_err()
     {
         let _ = unsafe { CloseHandle(process) };
-        return Err("无法检查正在运行的 Codex".to_string());
+        return Err("無法檢查正在執行的 Codex".to_string());
     }
 
     let mut session = 0;
@@ -1205,7 +1265,7 @@ fn quit_codex_normally(pid: u32) -> Result<(), String> {
     let started = unsafe { RmStartSession(&mut session, None, PWSTR(session_key.as_mut_ptr())) };
     if started != ERROR_SUCCESS {
         let _ = unsafe { CloseHandle(process) };
-        return Err("无法请求 Codex 退出".to_string());
+        return Err("無法請求 Codex 結束".to_string());
     }
     let application = RM_UNIQUE_PROCESS {
         dwProcessId: pid,
@@ -1220,7 +1280,7 @@ fn quit_codex_normally(pid: u32) -> Result<(), String> {
     let _ = unsafe { RmEndSession(session) };
     if shutdown != ERROR_SUCCESS {
         let _ = unsafe { CloseHandle(process) };
-        return Err("Codex 没有接受退出请求".to_string());
+        return Err("Codex 沒有接受結束請求".to_string());
     }
 
     let exited = unsafe {
@@ -1233,7 +1293,7 @@ fn quit_codex_normally(pid: u32) -> Result<(), String> {
     if exited {
         Ok(())
     } else {
-        Err("Codex 尚未退出，任务面板没有启动".to_string())
+        Err("Codex 尚未結束，任務面板沒有啟動".to_string())
     }
 }
 
@@ -1244,13 +1304,13 @@ fn find_codex_app(_home_directory: &Path) -> Option<PathBuf> {
 }
 
 #[cfg(target_os = "linux")]
-fn ordinary_codex_process(app_path: &Path, codex_profile: &Path) -> Result<Option<u32>, String> {
+fn ordinary_codex_process(app_path: &Path, _codex_profile: &Path) -> Result<Option<u32>, String> {
     let output = StdCommand::new("/bin/ps")
         .args(["-ww", "-axo", "pid=,ppid=,command="])
         .output()
         .map_err(|error| error.to_string())?;
     if !output.status.success() {
-        return Err("无法检查正在运行的 Codex".to_string());
+        return Err("無法檢查正在執行的 Codex".to_string());
     }
 
     let executable = app_path.to_string_lossy();
@@ -1277,7 +1337,9 @@ fn ordinary_codex_process(app_path: &Path, codex_profile: &Path) -> Result<Optio
         processes.push((pid, parent_pid, command.to_string()));
     }
 
-    let managed_profile = format!("--user-data-dir={}", codex_profile.display());
+    // Coexistence: like Windows, a root Codex with its own `--user-data-dir` and a private CDP
+    // pipe is launcher-managed (this app's `codex_profile` or another taskboard launcher's, such
+    // as Dashi "Codex Taskboard"), so it is never treated as an ordinary Codex to quit.
     Ok(processes
         .iter()
         .find(|(pid, parent_pid, command)| {
@@ -1285,7 +1347,7 @@ fn ordinary_codex_process(app_path: &Path, codex_profile: &Path) -> Result<Optio
                 .iter()
                 .any(|(candidate_pid, _, _)| candidate_pid == parent_pid && candidate_pid != pid)
                 && !(command.contains(" --remote-debugging-pipe")
-                    && command.contains(&format!(" {managed_profile}")))
+                    && command.contains(" --user-data-dir="))
         })
         .map(|(pid, _, _)| *pid))
 }
@@ -1293,31 +1355,31 @@ fn ordinary_codex_process(app_path: &Path, codex_profile: &Path) -> Result<Optio
 #[cfg(target_os = "linux")]
 fn quit_codex_normally(pid: u32) -> Result<(), String> {
     if unsafe { libc::kill(pid as i32, libc::SIGTERM) } != 0 {
-        return Err("Codex 没有接受退出请求".to_string());
+        return Err("Codex 沒有接受結束請求".to_string());
     }
     let deadline = Instant::now() + LAUNCHER_STOP_TIMEOUT;
     while process_is_running(pid) && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(100));
     }
     if process_is_running(pid) {
-        return Err("Codex 尚未退出，任务面板没有启动".to_string());
+        return Err("Codex 尚未結束，任務面板沒有啟動".to_string());
     }
     Ok(())
 }
 
 #[cfg(target_os = "macos")]
 fn missing_codex_app_message() -> String {
-    "未找到官方 ChatGPT.app 或 Codex.app。请先安装到 Applications 文件夹。".to_string()
+    "未找到官方 ChatGPT.app 或 Codex.app。請先安裝到 Applications 資料夾。".to_string()
 }
 
 #[cfg(target_os = "windows")]
 fn missing_codex_app_message() -> String {
-    "未找到官方 Codex App。请先从 Microsoft Store 安装。".to_string()
+    "未找到官方 Codex App。請先從 Microsoft Store 安裝。".to_string()
 }
 
 #[cfg(target_os = "linux")]
 fn missing_codex_app_message() -> String {
-    "未找到官方 ChatGPT App。请先安装 Ubuntu x64 .deb。".to_string()
+    "未找到官方 ChatGPT App。請先安裝 Ubuntu x64 .deb。".to_string()
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1336,17 +1398,13 @@ fn process_group_is_running(pid: u32) -> bool {
 
 #[cfg(target_os = "windows")]
 fn process_group_is_running(pid: u32) -> bool {
-    StdCommand::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            &format!(
-                "if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ exit 0 }} else {{ exit 1 }}"
-            ),
-        ])
-        .status()
-        .is_ok_and(|status| status.success())
+    // Amendment 14: polled every 100 ms while stopping; a native check starts no PowerShell window.
+    let Ok(process) = (unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }) else {
+        return false;
+    };
+    let running = unsafe { WaitForSingleObject(process, 0) } == WAIT_TIMEOUT;
+    let _ = unsafe { CloseHandle(process) };
+    running
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1416,7 +1474,7 @@ fn terminate_process_group(pid: u32) {
 #[cfg(target_os = "windows")]
 fn terminate_process_group(pid: u32) {
     if process_group_is_running(pid) {
-        let _ = StdCommand::new("taskkill.exe")
+        let _ = windows_command("taskkill.exe")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .status();
     }
@@ -1454,7 +1512,7 @@ fn process_matches_record(record: &LauncherPidRecord) -> bool {
 
 #[cfg(target_os = "windows")]
 fn process_matches_record(record: &LauncherPidRecord) -> bool {
-    let output = StdCommand::new("powershell.exe")
+    let output = windows_command("powershell.exe")
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -1523,16 +1581,75 @@ fn stop_managed_child_locked(app: &AppHandle, state: &Arc<LauncherState>) {
         if !wait_for_process_group_exit(pid, STOP_TIMEOUT) {
             terminate_process_group(pid);
         }
+        // Amendment 14: after the graceful stop, whatever is left of the service tree (the board
+        // server, codex-runtime codex.exe) is killed so no installed file stays locked.
+        #[cfg(target_os = "windows")]
+        terminate_service_job(state, pid);
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         stop_launcher_process_group(pid);
         clear_pid_record(state, pid);
     }
     update_snapshot(app, state, |snapshot| {
         snapshot.phase = "stopped".into();
-        snapshot.message = "任务面板已停止。".into();
+        snapshot.message = "任務面板已停止。".into();
         snapshot.child_pid = None;
         snapshot.open_signal_pid = None;
     });
+}
+
+/// Amendment 14: puts the new service child in its own Job Object (kill on close) and adopts, once a
+/// second while that child is current, its descendants that run from the install directory or
+/// codex-runtime. A failure is logged and the service still runs (2.0.1 behaviour).
+#[cfg(target_os = "windows")]
+fn attach_service_job(state: &Arc<LauncherState>, pid: u32) {
+    terminate_service_job(state, 0);
+    let job = match windows_job::ServiceJob::new().and_then(|job| job.assign(pid).map(|_| job)) {
+        Ok(job) => Arc::new(job),
+        Err(error) => {
+            append_log(state, &format!("Service job unavailable for {pid}: {error}"));
+            return;
+        }
+    };
+    *state.service_job.lock().unwrap() = Some((pid, Arc::clone(&job)));
+    let mut roots = vec![state.data_directory.join("codex-runtime")];
+    if let Some(install_directory) = std::env::current_exe()
+        .ok()
+        .and_then(|executable| executable.parent().map(Path::to_path_buf))
+    {
+        roots.push(install_directory);
+    }
+    let state = Arc::clone(state);
+    thread::spawn(move || loop {
+        let current = state
+            .service_job
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|(job_pid, current)| *job_pid == pid && Arc::ptr_eq(current, &job));
+        if !current {
+            return;
+        }
+        job.adopt_owned_descendants(pid, &roots);
+        thread::sleep(Duration::from_secs(1));
+    });
+}
+
+/// Kills and releases the service job of `pid` (any job when `pid` is 0).
+#[cfg(target_os = "windows")]
+fn terminate_service_job(state: &LauncherState, pid: u32) {
+    let job = {
+        let mut current = state.service_job.lock().unwrap();
+        if current.as_ref().is_some_and(|(job_pid, _)| pid == 0 || *job_pid == pid) {
+            current.take()
+        } else {
+            None
+        }
+    };
+    if let Some((job_pid, job)) = job {
+        if !job.terminate_and_wait(STOP_TIMEOUT) {
+            append_log(state, &format!("Service job of {job_pid} still has running processes"));
+        }
+    }
 }
 
 fn stop_managed_child(app: &AppHandle, state: &Arc<LauncherState>) {
@@ -1564,13 +1681,15 @@ fn watch_launcher_output<R: std::io::Read + Send + 'static>(
                     return;
                 }
                 match event {
+                    // Amendment 14: waitingForCodex is only emitted after the service is ready, and
+                    // the board works without Codex, so the service counts as running.
                     LauncherEvent::WaitingForCodex => {
-                        snapshot.phase = "starting".into();
-                        snapshot.message = "正在等待 Codex 窗口…".into();
+                        snapshot.phase = "running".into();
+                        snapshot.message = "任務面板服務正常；Codex 側欄正在等待 Codex 視窗。".into();
                     }
                     LauncherEvent::ServiceReady => {
                         snapshot.phase = "starting".into();
-                        snapshot.message = "任务面板服务已启动，正在注入 Codex…".into();
+                        snapshot.message = "任務面板服務已啟動，正在檢查 Codex…".into();
                     }
                     LauncherEvent::OpenSignalReady => {
                         snapshot.open_signal_pid = Some(pid);
@@ -1585,11 +1704,15 @@ fn watch_launcher_output<R: std::io::Read + Send + 'static>(
                     }
                     LauncherEvent::OpenedInExistingCodex => {
                         snapshot.phase = "running".into();
-                        snapshot.message = "任务面板已在现有 Codex 的浏览面板中打开。".into();
+                        snapshot.message = "任務面板已在現有 Codex 的瀏覽面板中開啟。".into();
                     }
                     LauncherEvent::Injected => {
                         snapshot.phase = "running".into();
-                        snapshot.message = "任务面板已在 Codex 客户端中打开。".into();
+                        snapshot.message = "任務面板服務正常，Codex 側欄入口已就緒。".into();
+                    }
+                    LauncherEvent::CodexNotAttached => {
+                        snapshot.phase = "running".into();
+                        snapshot.message = CODEX_NOT_ATTACHED_MESSAGE.into();
                     }
                 }
             });
@@ -1597,9 +1720,15 @@ fn watch_launcher_output<R: std::io::Read + Send + 'static>(
     });
 }
 
+/// Amendment 14: the board runs without Codex; the sidebar is only injected into a Codex that is
+/// already running with a reachable CDP renderer, or after an explicit tray request.
+const CODEX_NOT_ATTACHED_MESSAGE: &str =
+    "任務面板服務正常。沒有自動開啟 Codex；需要 Codex 側欄時請從選單「在 Codex 開啟任務面板」。";
+
 fn start_launcher_locked(
     app: &AppHandle,
     state: &Arc<LauncherState>,
+    codex_start: CodexStart,
 ) -> Result<LauncherSnapshot, String> {
     if state.child.lock().unwrap().is_some() {
         return Ok(state.snapshot.lock().unwrap().clone());
@@ -1616,54 +1745,55 @@ fn start_launcher_locked(
     let node_path = std::env::current_exe()
         .map_err(|error| error.to_string())?
         .parent()
-        .ok_or_else(|| "无法定位 App 可执行文件目录".to_string())?
+        .ok_or_else(|| "無法定位 App 執行檔目錄".to_string())?
         .join(if cfg!(target_os = "windows") {
             "node.exe"
         } else if cfg!(target_os = "linux") {
-            "codex-taskboard-node"
+            "automate-taskboard-node"
         } else {
             "node"
         });
     let codex_profile = state.data_directory.join("codex-profile");
     stop_recorded_child(state);
-    #[cfg(target_os = "macos")]
-    let ordinary_codex_pid = ordinary_codex_process(&codex_app)?;
-    #[cfg(target_os = "windows")]
-    let ordinary_codex_pid = ordinary_codex_process(&codex_app, &codex_profile)?;
-    #[cfg(target_os = "linux")]
-    let ordinary_codex_pid = ordinary_codex_process(&codex_app, &codex_profile)?;
-    if let Some(codex_pid) = ordinary_codex_pid {
-        let restart = app
-            .dialog()
-            .message("需要重新启动 Codex 才能显示任务面板")
-            .title("Codex Taskboard")
-            .kind(MessageDialogKind::Info)
-            .buttons(MessageDialogButtons::OkCancelCustom(
-                "重新启动 Codex".into(),
-                "取消".into(),
-            ))
-            .blocking_show();
-        if !restart {
-            append_log(state, "Codex restart canceled by user");
-            return Ok(update_snapshot(app, state, |snapshot| {
-                snapshot.phase = "stopped".into();
-                snapshot.message = "已取消重新启动 Codex，任务面板未注入。".into();
-                snapshot.app_path = Some(codex_app.display().to_string());
-                snapshot.open_signal_pid = None;
-                snapshot.open_request_pending = false;
-            }));
+    // Amendment 14: only the explicit 「重新開啟 Codex」 asks to quit a running ordinary Codex; a
+    // manual start, a login start, recovery and update fallbacks never touch the Codex App.
+    let mut codex_start = codex_start;
+    if codex_start == CodexStart::Relaunch {
+        #[cfg(target_os = "macos")]
+        let ordinary_codex_pid = ordinary_codex_process(&codex_app)?;
+        #[cfg(target_os = "windows")]
+        let ordinary_codex_pid = ordinary_codex_process(&codex_app, &codex_profile)?;
+        #[cfg(target_os = "linux")]
+        let ordinary_codex_pid = ordinary_codex_process(&codex_app, &codex_profile)?;
+        if let Some(codex_pid) = ordinary_codex_pid {
+            let restart = app
+                .dialog()
+                .message("需要重新啟動 Codex 才能顯示任務面板")
+                .title("AutoMate Taskboard")
+                .kind(MessageDialogKind::Info)
+                .buttons(MessageDialogButtons::OkCancelCustom(
+                    "重新啟動 Codex".into(),
+                    "取消".into(),
+                ))
+                .blocking_show();
+            if restart {
+                append_log(
+                    state,
+                    &format!("Requesting normal Codex exit for PID {codex_pid}"),
+                );
+                quit_codex_normally(codex_pid)?;
+            } else {
+                // The board service keeps running; only the Codex restart is skipped.
+                append_log(state, "Codex restart canceled by user; starting without Codex");
+                codex_start = CodexStart::AttachOnly;
+            }
         }
-        append_log(
-            state,
-            &format!("Requesting normal Codex exit for PID {codex_pid}"),
-        );
-        quit_codex_normally(codex_pid)?;
     }
     let generation = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
     state.intentional_stop.store(false, Ordering::SeqCst);
     update_snapshot(app, state, |snapshot| {
         snapshot.phase = "starting".into();
-        snapshot.message = "正在启动任务面板服务…".into();
+        snapshot.message = "正在啟動任務面板服務…".into();
         snapshot.app_path = Some(codex_app.display().to_string());
         snapshot.open_signal_pid = None;
     });
@@ -1689,7 +1819,7 @@ fn start_launcher_locked(
     let instance_secret = Uuid::new_v4().to_string();
     let version = state.snapshot.lock().unwrap().version.clone();
     let manage_taskboard_skill_path =
-        home_directory.join(".agents/skills/manage-taskboard/SKILL.md");
+        home_directory.join(".agents/skills/manage-automate-taskboard/SKILL.md");
     #[cfg(target_os = "macos")]
     let codex_source_profile = home_directory.join("Library/Application Support/Codex");
     #[cfg(target_os = "windows")]
@@ -1703,17 +1833,21 @@ fn start_launcher_locked(
         .map(PathBuf::from)
         .unwrap_or_else(|| home_directory.join(".config"))
         .join("Codex");
-    let mut command = StdCommand::new(&node_path);
     #[cfg(target_os = "windows")]
-    command.creation_flags(CREATE_NO_WINDOW.0);
+    let mut command = windows_command(&node_path);
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    let mut command = StdCommand::new(&node_path);
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     command.arg(&injector_path);
     #[cfg(target_os = "windows")]
     command.arg(r"scripts\codex-injector.mjs");
+    // Amendment 12 (product decision): no --open. The board window is the default surface; the
+    // Codex side panel stays injected and opens only on request (tray 「在 Codex 開啟任務面板」).
     #[cfg(any(target_os = "macos", target_os = "windows"))]
-    command.args(["--launch", "--watch", "--open", "--port", &codex_port]);
+    command.args(["--launch", "--watch", "--port", &codex_port]);
     #[cfg(target_os = "linux")]
-    command.args(["--launch", "--watch", "--open", "--cdp-pipe"]);
+    command.args(["--launch", "--watch", "--cdp-pipe"]);
+    command.args(injector_codex_args(codex_start));
     command
         .args(["--startup-token", &instance_token, "--app-path"])
         .arg(&codex_app)
@@ -1763,6 +1897,8 @@ fn start_launcher_locked(
     let mut child = command.spawn().map_err(|error| error.to_string())?;
     let pid = child.id();
     #[cfg(target_os = "windows")]
+    attach_service_job(state, pid);
+    #[cfg(target_os = "windows")]
     let child_control = child.stdin.take();
     if let Err(error) = write_pid_record(state, pid, node_path, injector_path) {
         terminate_process_group(pid);
@@ -1779,6 +1915,8 @@ fn start_launcher_locked(
     let snapshot = update_snapshot(app, state, |snapshot| {
         snapshot.child_pid = Some(pid);
     });
+    // Amendment 12: an open board window follows the new port / instance token.
+    board_window::follow_service_child(app, state, pid);
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     append_log(
         state,
@@ -1837,6 +1975,8 @@ fn start_launcher_locked(
                 &format!("Launcher child {pid} exited: {status:?}"),
             );
             terminate_process_group(pid);
+            #[cfg(target_os = "windows")]
+            terminate_service_job(&event_state, pid);
             return;
         };
         let intentional = event_state.intentional_stop.load(Ordering::SeqCst);
@@ -1848,7 +1988,7 @@ fn start_launcher_locked(
                 snapshot.open_signal_pid = None;
                 if !intentional {
                     snapshot.phase = "error".into();
-                    snapshot.message = "任务面板进程已退出，正在恢复…".into();
+                    snapshot.message = "任務面板處理程序已結束，正在恢復…".into();
                 }
             }
         });
@@ -1857,6 +1997,8 @@ fn start_launcher_locked(
             &format!("Launcher child {pid} exited: {status:?}"),
         );
         terminate_process_group(pid);
+        #[cfg(target_os = "windows")]
+        terminate_service_job(&event_state, pid);
         clear_pid_record(&event_state, pid);
         if intentional {
             return;
@@ -1870,7 +2012,7 @@ fn start_launcher_locked(
             {
                 return;
             }
-            let result = start_launcher_locked(&event_app, &event_state);
+            let result = start_launcher_locked(&event_app, &event_state, CodexStart::AttachOnly);
             let generation = event_state.generation.load(Ordering::SeqCst);
             (result, generation)
         };
@@ -1887,8 +2029,8 @@ fn start_launcher_locked(
             });
             show_error_dialog(
                 &event_app,
-                "Codex Taskboard 恢复失败",
-                &format!("任务面板进程无法恢复：{error}\n\n请重新打开 App。"),
+                "AutoMate Taskboard 恢復失敗",
+                &format!("任務面板處理程序無法恢復：{error}\n\n請重新開啟 App。"),
             );
         }
     });
@@ -1902,7 +2044,7 @@ fn start_launcher(app: &AppHandle, state: &Arc<LauncherState>) -> Result<Launche
     {
         return Ok(state.snapshot.lock().unwrap().clone());
     }
-    start_launcher_locked(app, state)
+    start_launcher_locked(app, state, CodexStart::AttachOnly)
 }
 
 fn restart_launcher(
@@ -1919,7 +2061,7 @@ fn restart_launcher(
             return Ok(state.snapshot.lock().unwrap().clone());
         }
         stop_managed_child_locked(app, state);
-        let result = start_launcher_locked(app, state);
+        let result = start_launcher_locked(app, state, CodexStart::Relaunch);
         state.intentional_stop.store(false, Ordering::SeqCst);
         let generation = state.generation.load(Ordering::SeqCst);
         (result, generation)
@@ -1931,7 +2073,7 @@ fn restart_launcher(
                 && snapshot.child_pid.is_none()
             {
                 snapshot.phase = "error".into();
-                snapshot.message = format!("任务面板启动失败：{error}");
+                snapshot.message = format!("任務面板啟動失敗：{error}");
                 snapshot.open_signal_pid = None;
             }
         });
@@ -1951,25 +2093,30 @@ fn open_taskboard_in_browser(state: &LauncherState) -> Result<(), String> {
     let descriptor: LauncherRuntimeDescriptor =
         serde_json::from_str(&descriptor).map_err(|error| error.to_string())?;
     let url = format!("{}/", descriptor.url.trim_end_matches('/'));
+    open_url_with_os(&url).map_err(|_| "系統預設瀏覽器沒有開啟任務面板".to_string())
+}
+
+/// Hands a URL (http(s), claude://, codex://, mailto:) to the operating system's default handler.
+fn open_url_with_os(url: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let status = StdCommand::new("/usr/bin/open")
-        .arg(&url)
+        .arg(url)
         .status()
         .map_err(|error| error.to_string())?;
     #[cfg(target_os = "windows")]
-    let status = StdCommand::new("rundll32.exe")
-        .args(["url.dll,FileProtocolHandler", &url])
+    let status = windows_command("rundll32.exe")
+        .args(["url.dll,FileProtocolHandler", url])
         .status()
         .map_err(|error| error.to_string())?;
     #[cfg(target_os = "linux")]
     let status = StdCommand::new("xdg-open")
-        .arg(&url)
+        .arg(url)
         .status()
         .map_err(|error| error.to_string())?;
     status
         .success()
         .then_some(())
-        .ok_or_else(|| "系统默认浏览器没有打开任务面板".to_string())
+        .ok_or_else(|| "系統沒有可以開啟這個連結的程式".to_string())
 }
 
 async fn check_for_startup_update(
@@ -1977,7 +2124,7 @@ async fn check_for_startup_update(
     state: &Arc<LauncherState>,
 ) -> Result<Option<Update>, String> {
     update_snapshot(app, state, |snapshot| {
-        snapshot.update_message = "正在检查更新…".into();
+        snapshot.update_message = "正在檢查更新…".into();
         snapshot.update_available = false;
     });
     let beta_release = is_beta_release();
@@ -2015,7 +2162,7 @@ async fn check_for_startup_update(
             append_log(state, &format!("Update {} is available", update.version));
             update_snapshot(app, state, |snapshot| {
                 snapshot.update_message =
-                    format!("发现新版本 {}，可以下载并安装。", update.version);
+                    format!("發現新版本 {}，可以下載並安裝。", update.version);
                 snapshot.update_available = true;
             });
         }
@@ -2023,7 +2170,7 @@ async fn check_for_startup_update(
             append_log(state, "No update is available");
             update_snapshot(app, state, |snapshot| {
                 snapshot.update_message =
-                    format!("当前版本 {} 已是最新版本。", snapshot.version.as_str());
+                    format!("目前版本 {} 已是最新版本。", snapshot.version.as_str());
                 snapshot.update_available = false;
             });
         }
@@ -2043,7 +2190,7 @@ async fn prepare_update(
         &format!("Downloading update {update_version} before confirmation"),
     );
     update_snapshot(app, state, |snapshot| {
-        snapshot.update_message = format!("正在下载 {update_version}…");
+        snapshot.update_message = format!("正在下載 {update_version}…");
         snapshot.update_available = true;
     });
     let progress_app = app.clone();
@@ -2070,8 +2217,8 @@ async fn prepare_update(
             displayed_progress = progress;
             let snapshot = update_snapshot(&progress_app, &progress_state, |snapshot| {
                 snapshot.update_message = match progress {
-                    Some(progress) => format!("正在下载 {progress_version} · {progress}%"),
-                    None => format!("正在下载 {progress_version}…"),
+                    Some(progress) => format!("正在下載 {progress_version} · {progress}%"),
+                    None => format!("正在下載 {progress_version}…"),
                 };
             });
             let dialog = progress_dialog.lock().unwrap().clone();
@@ -2081,7 +2228,7 @@ async fn prepare_update(
         },
         move || {
             let snapshot = update_snapshot(&finish_app, &finish_state, |snapshot| {
-                snapshot.update_message = "正在验证更新…".into();
+                snapshot.update_message = "正在驗證更新…".into();
             });
             let dialog = finish_dialog.lock().unwrap().clone();
             if let Some(dialog) = dialog {
@@ -2097,7 +2244,7 @@ async fn prepare_update(
         &format!("Downloaded and verified update {update_version}"),
     );
     update_snapshot(app, state, |snapshot| {
-        snapshot.update_message = format!("{update_version} 已下载并通过签名验证，等待安装。");
+        snapshot.update_message = format!("{update_version} 已下載並通過簽名驗證，等待安裝。");
         snapshot.update_available = true;
     });
     Ok(bytes)
@@ -2137,7 +2284,7 @@ async fn prepare_available_update(
             if let Err(error) = &result {
                 append_log(&state, &format!("Update {} preparation failed: {error}", update.version));
                 update_snapshot(&app, &state, |snapshot| {
-                    snapshot.update_message = format!("更新下载或签名验证失败：{error}");
+                    snapshot.update_message = format!("更新下載或簽名驗證失敗：{error}");
                     snapshot.update_available = true;
                 });
             }
@@ -2161,7 +2308,7 @@ fn install_update(
     state.update_in_progress.store(true, Ordering::SeqCst);
 
     let snapshot = update_snapshot(app, state, |snapshot| {
-        snapshot.update_message = "正在安装更新…".into();
+        snapshot.update_message = "正在安裝更新…".into();
         snapshot.update_available = false;
     });
     update_dialog.show_installing(&snapshot.update_message);
@@ -2176,7 +2323,7 @@ fn install_update(
         append_log(state, &format!("Update installation failed: {error}"));
         let restart_error = {
             let _lifecycle = state.lifecycle.lock().unwrap();
-            let restart_error = start_launcher_locked(app, state).err();
+            let restart_error = start_launcher_locked(app, state, CodexStart::AttachOnly).err();
             state.intentional_stop.store(false, Ordering::SeqCst);
             state.update_in_progress.store(false, Ordering::SeqCst);
             restart_error
@@ -2193,11 +2340,11 @@ fn install_update(
             );
         }
         update_snapshot(app, state, |snapshot| {
-            snapshot.update_message = format!("更新安装失败：{error}");
+            snapshot.update_message = format!("更新安裝失敗：{error}");
             snapshot.update_available = true;
             if let Some(restart_error) = &restart_error {
                 snapshot.phase = "error".into();
-                snapshot.message = format!("任务面板恢复失败：{restart_error}");
+                snapshot.message = format!("任務面板恢復失敗：{restart_error}");
             }
         });
         return Err(error.to_string());
@@ -2208,10 +2355,380 @@ fn install_update(
         &format!("Installed update {update_version}; restarting"),
     );
     let snapshot = update_snapshot(app, state, |snapshot| {
-        snapshot.update_message = "正在重启…".into();
+        snapshot.update_message = "正在重新啟動…".into();
     });
     update_dialog.set_progress(&snapshot.update_message, None, false);
     app.restart()
+}
+
+/// Waits for a child whose stdout/stderr are piped, draining both pipes on their own threads while
+/// waiting so a large output can never fill the pipe buffer and block the child (W11 review #1).
+/// Returns `Ok(None)` after killing the child when `timeout` elapses.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn wait_child_output_with_timeout(
+    mut child: std::process::Child,
+    timeout: Duration,
+) -> std::io::Result<Option<std::process::Output>> {
+    use std::io::Read;
+    fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> Option<thread::JoinHandle<Vec<u8>>> {
+        pipe.map(|mut pipe| {
+            thread::spawn(move || {
+                let mut buffer = Vec::new();
+                let _ = pipe.read_to_end(&mut buffer);
+                buffer
+            })
+        })
+    }
+    let stdout_reader = drain(child.stdout.take());
+    let stderr_reader = drain(child.stderr.take());
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                // Reader threads end once the pipes close; they are not joined so a grandchild
+                // still holding a pipe cannot block the caller.
+                return Ok(None);
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(50)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        }
+    };
+    let join = |reader: Option<thread::JoinHandle<Vec<u8>>>| {
+        reader
+            .map(|handle| handle.join().unwrap_or_default())
+            .unwrap_or_default()
+    };
+    Ok(Some(std::process::Output {
+        status,
+        stdout: join(stdout_reader),
+        stderr: join(stderr_reader),
+    }))
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SharedUpdateResult {
+    status: String,
+    version: Option<String>,
+    current_version: Option<String>,
+    notes: Option<String>,
+    installer_path: Option<String>,
+    message: Option<String>,
+}
+
+/// Amendment 11: runs app\scripts\update-check.mjs with the bundled Node and returns its JSON.
+#[cfg(target_os = "windows")]
+fn run_shared_update_script(
+    app: &AppHandle,
+    state: &Arc<LauncherState>,
+    extra_args: &[String],
+    timeout: Duration,
+) -> Result<SharedUpdateResult, String> {
+    let resource_directory = app
+        .path()
+        .resource_dir()
+        .map_err(|error| error.to_string())?;
+    let node_path = std::env::current_exe()
+        .map_err(|error| error.to_string())?
+        .parent()
+        .ok_or_else(|| "無法定位 App 執行檔目錄".to_string())?
+        .join("node.exe");
+    let script = resource_directory.join("app").join("scripts").join("update-check.mjs");
+    let mut command = windows_command(&node_path);
+    command
+        .arg(&script)
+        .args(extra_args)
+        .arg("--build-config")
+        .arg(resource_directory.join("update-source.json"))
+        .arg("--override-config")
+        .arg(state.data_directory.join("update-source.json"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = command
+        .spawn()
+        .map_err(|error| format!("無法啟動更新檢查程式：{error}"))?;
+    let output = match wait_child_output_with_timeout(child, timeout) {
+        Ok(Some(output)) => output,
+        Ok(None) => return Err("更新檢查逾時，請確認能連到更新資料夾所在的網路。".into()),
+        Err(error) => return Err(format!("更新檢查程式異常：{error}")),
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .ok_or_else(|| {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            append_log(state, &format!("Shared update script produced no result: {stderr}"));
+            "更新檢查程式沒有回傳結果。".to_string()
+        })?;
+    serde_json::from_str(line).map_err(|error| format!("更新檢查結果格式錯誤：{error}"))
+}
+
+#[cfg(target_os = "windows")]
+async fn run_shared_update_script_async(
+    app: &AppHandle,
+    state: &Arc<LauncherState>,
+    extra_args: Vec<String>,
+    timeout: Duration,
+) -> Result<SharedUpdateResult, String> {
+    let app = app.clone();
+    let state = Arc::clone(state);
+    tauri::async_runtime::spawn_blocking(move || {
+        run_shared_update_script(&app, &state, &extra_args, timeout)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Stops the board service, starts the NSIS installer in passive update mode and exits so the
+/// installer can replace files. `/P` passive, `/R` start the app again after install, `/UPDATE`
+/// keeps user data and the autostart entry (Tauri NSIS template).
+#[cfg(target_os = "windows")]
+fn launch_shared_update_installer(
+    app: &AppHandle,
+    state: &Arc<LauncherState>,
+    installer_path: &Path,
+    version: &str,
+) -> Result<(), String> {
+    state.update_in_progress.store(true, Ordering::SeqCst);
+    update_snapshot(app, state, |snapshot| {
+        snapshot.update_message = format!("正在安裝 {version}…");
+        snapshot.update_available = false;
+    });
+    {
+        let _lifecycle = state.lifecycle.lock().unwrap();
+        stop_managed_child_locked(app, state);
+    }
+    let spawned = windows_command(installer_path)
+        .args(["/P", "/R", "/UPDATE"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    if let Err(error) = spawned {
+        append_log(state, &format!("Shared update installer failed to start: {error}"));
+        let restart_error = {
+            let _lifecycle = state.lifecycle.lock().unwrap();
+            let restart_error = start_launcher_locked(app, state, CodexStart::AttachOnly).err();
+            state.intentional_stop.store(false, Ordering::SeqCst);
+            state.update_in_progress.store(false, Ordering::SeqCst);
+            restart_error
+        };
+        update_snapshot(app, state, |snapshot| {
+            snapshot.update_message = format!("無法啟動安裝程式：{error}");
+            snapshot.update_available = true;
+            if let Some(restart_error) = &restart_error {
+                snapshot.phase = "error".into();
+                snapshot.message = format!("任務面板恢復失敗：{restart_error}");
+            }
+        });
+        return Err(format!("無法啟動安裝程式：{error}"));
+    }
+    append_log(
+        state,
+        &format!("Started shared update installer for {version}; exiting"),
+    );
+    state.update_in_progress.store(false, Ordering::SeqCst);
+    app.exit(0);
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+async fn offer_shared_folder_update(
+    app: &AppHandle,
+    state: &Arc<LauncherState>,
+    check_update: &MenuItem<tauri::Wry>,
+    quit: &MenuItem<tauri::Wry>,
+    manual: bool,
+) {
+    if state
+        .update_flow_in_progress
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    check_update.set_text("正在檢查更新…").unwrap();
+    check_update.set_enabled(false).unwrap();
+    let current_version = release_version().to_string();
+    let check = run_shared_update_script_async(
+        app,
+        state,
+        vec!["check".into(), "--current".into(), current_version.clone()],
+        SHARED_UPDATE_CHECK_TIMEOUT,
+    )
+    .await;
+    let result = match check {
+        Ok(result) if result.status == "error" => {
+            Err(result.message.unwrap_or_else(|| "無法檢查更新。".into()))
+        }
+        other => other,
+    };
+    let result = match result {
+        Ok(result) => result,
+        Err(error) => {
+            append_log(state, &format!("Shared update check failed: {error}"));
+            update_snapshot(app, state, |snapshot| {
+                snapshot.update_message = format!("更新檢查失敗：{error}");
+                snapshot.update_available = false;
+            });
+            if manual {
+                show_error_dialog(
+                    app,
+                    "AutoMate Taskboard 更新檢查失敗",
+                    &format!("無法檢查更新。請稍後重試。\n\n{error}"),
+                );
+            }
+            finish_update_flow(state, check_update, quit);
+            return;
+        }
+    };
+
+    let info_dialog = |message: String| {
+        app.dialog()
+            .message(message)
+            .title("AutoMate Taskboard 更新")
+            .buttons(MessageDialogButtons::Ok)
+            .blocking_show();
+    };
+    match result.status.as_str() {
+        "disabled" => {
+            append_log(state, "Shared update source is not configured");
+            update_snapshot(app, state, |snapshot| {
+                snapshot.update_message = "未設定更新來源，自動更新已停用。".into();
+                snapshot.update_available = false;
+            });
+            if manual {
+                info_dialog("這個版本沒有設定更新來源，自動更新已停用。".into());
+            }
+            finish_update_flow(state, check_update, quit);
+            return;
+        }
+        "available" => {}
+        _ => {
+            update_snapshot(app, state, |snapshot| {
+                snapshot.update_message = format!("目前版本 {current_version} 已是最新版本。");
+                snapshot.update_available = false;
+            });
+            if manual {
+                info_dialog(format!("目前版本 {current_version} 已是最新版本。"));
+            }
+            finish_update_flow(state, check_update, quit);
+            return;
+        }
+    }
+
+    let Some(version) = result.version.clone() else {
+        finish_update_flow(state, check_update, quit);
+        return;
+    };
+    update_snapshot(app, state, |snapshot| {
+        snapshot.update_message = format!("發現新版本 {version}。");
+        snapshot.update_available = true;
+    });
+    if !manual && DECLINED_SHARED_UPDATE.lock().unwrap().as_deref() == Some(version.as_str()) {
+        finish_update_flow(state, check_update, quit);
+        return;
+    }
+    let shown_current = result.current_version.clone().unwrap_or(current_version.clone());
+    let notes = result.notes.clone().unwrap_or_default();
+    let mut prompt = format!("有新版本 {version}（目前 {shown_current}）。要現在更新嗎？");
+    if !notes.trim().is_empty() {
+        prompt.push_str("\n\n");
+        prompt.push_str(notes.trim());
+    }
+    prompt.push_str("\n\n更新時會暫時關閉任務面板，安裝完成後自動重新開啟；資料會保留。");
+    append_log(state, &format!("Showing shared update prompt for {version}"));
+    let accepted = app
+        .dialog()
+        .message(prompt)
+        .title("AutoMate Taskboard 更新")
+        .kind(MessageDialogKind::Info)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "現在更新".into(),
+            "稍後".into(),
+        ))
+        .blocking_show();
+    if !accepted {
+        append_log(state, &format!("Shared update {version} deferred by user"));
+        *DECLINED_SHARED_UPDATE.lock().unwrap() = Some(version.clone());
+        update_snapshot(app, state, |snapshot| {
+            snapshot.update_message = format!("已暫緩安裝 {version}，可稍後從檢查更新繼續。");
+            snapshot.update_available = true;
+        });
+        finish_update_flow(state, check_update, quit);
+        return;
+    }
+
+    update_snapshot(app, state, |snapshot| {
+        snapshot.update_message = format!("正在複製並驗證 {version}…");
+    });
+    check_update.set_text("正在準備更新…").unwrap();
+    let prepared = run_shared_update_script_async(
+        app,
+        state,
+        vec![
+            "prepare".into(),
+            "--current".into(),
+            current_version.clone(),
+            "--expect-version".into(),
+            version.clone(),
+        ],
+        SHARED_UPDATE_PREPARE_TIMEOUT,
+    )
+    .await;
+    let installer_path = match prepared {
+        Ok(result) if result.status == "ready" && result.installer_path.is_some() => {
+            PathBuf::from(result.installer_path.unwrap())
+        }
+        Ok(result) => {
+            let message = result.message.unwrap_or_else(|| "無法準備更新。".into());
+            append_log(state, &format!("Shared update prepare failed: {message}"));
+            update_snapshot(app, state, |snapshot| {
+                snapshot.update_message = format!("更新準備失敗：{message}");
+            });
+            show_error_dialog(
+                app,
+                "AutoMate Taskboard 更新準備失敗",
+                &format!("無法複製或驗證更新，未做任何變更。\n\n{message}"),
+            );
+            finish_update_flow(state, check_update, quit);
+            return;
+        }
+        Err(error) => {
+            append_log(state, &format!("Shared update prepare failed: {error}"));
+            update_snapshot(app, state, |snapshot| {
+                snapshot.update_message = format!("更新準備失敗：{error}");
+            });
+            show_error_dialog(
+                app,
+                "AutoMate Taskboard 更新準備失敗",
+                &format!("無法複製或驗證更新，未做任何變更。\n\n{error}"),
+            );
+            finish_update_flow(state, check_update, quit);
+            return;
+        }
+    };
+
+    quit.set_enabled(false).unwrap();
+    if let Err(error) = launch_shared_update_installer(app, state, &installer_path, &version) {
+        show_error_dialog(
+            app,
+            "AutoMate Taskboard 更新失敗",
+            &format!("更新未完成，資料沒有變更。\n\n{error}"),
+        );
+        finish_update_flow(state, check_update, quit);
+    }
 }
 
 fn finish_update_flow(
@@ -2220,7 +2737,7 @@ fn finish_update_flow(
     quit: &MenuItem<tauri::Wry>,
 ) {
     state.update_in_progress.store(false, Ordering::SeqCst);
-    check_update.set_text("检查更新").unwrap();
+    check_update.set_text("檢查更新").unwrap();
     check_update.set_enabled(true).unwrap();
     quit.set_enabled(true).unwrap();
     state.update_flow_in_progress.store(false, Ordering::SeqCst);
@@ -2234,14 +2751,10 @@ async fn offer_update(
     show_current_version: bool,
 ) {
     if cfg!(target_os = "windows") {
-        update_snapshot(app, state, |snapshot| {
-            snapshot.update_message = "Windows 版本暂不支持自动更新。".into();
-            snapshot.update_available = false;
-        });
-        check_update
-            .set_text("检查更新（Windows 暂不支持）")
-            .unwrap();
-        check_update.set_enabled(false).unwrap();
+        // Amendment 11: Windows updates come from the signed shared-folder manifest, not the
+        // Tauri updater endpoint.
+        #[cfg(target_os = "windows")]
+        offer_shared_folder_update(app, state, check_update, quit, show_current_version).await;
         return;
     }
     if show_current_version {
@@ -2252,7 +2765,7 @@ async fn offer_update(
         {
             return;
         }
-        check_update.set_text("正在检查更新…").unwrap();
+        check_update.set_text("正在檢查更新…").unwrap();
         check_update.set_enabled(false).unwrap();
     } else if state.update_flow_in_progress.load(Ordering::SeqCst) {
         return;
@@ -2262,14 +2775,14 @@ async fn offer_update(
         Err(error) => {
             append_log(state, &format!("Update check failed: {error}"));
             update_snapshot(app, state, |snapshot| {
-                snapshot.update_message = format!("更新检查失败：{error}");
+                snapshot.update_message = format!("更新檢查失敗：{error}");
                 snapshot.update_available = false;
             });
             if show_current_version {
                 show_error_dialog(
                     app,
-                    "Codex Taskboard 更新检查失败",
-                    &format!("无法检查更新。请稍后重试。\n\n{error}"),
+                    "AutoMate Taskboard 更新檢查失敗",
+                    &format!("無法檢查更新。請稍後重試。\n\n{error}"),
                 );
                 finish_update_flow(state, check_update, quit);
             }
@@ -2282,8 +2795,8 @@ async fn offer_update(
     let Some(update) = update else {
         let current_version = state.snapshot.lock().unwrap().version.clone();
         app.dialog()
-            .message(format!("当前版本 {current_version} 已是最新版本。"))
-            .title("Codex Taskboard 更新")
+            .message(format!("目前版本 {current_version} 已是最新版本。"))
+            .title("AutoMate Taskboard 更新")
             .buttons(MessageDialogButtons::Ok)
             .blocking_show();
         finish_update_flow(state, check_update, quit);
@@ -2296,7 +2809,7 @@ async fn offer_update(
         append_log(state, &format!("Update {version} deferred by user"));
         update_snapshot(app, state, |snapshot| {
             snapshot.update_message =
-                format!("已暂缓安装 {version}，可稍后从检查更新继续。");
+                format!("已暫緩安裝 {version}，可稍後從檢查更新繼續。");
             snapshot.update_available = true;
         });
         finish_update_flow(state, check_update, quit);
@@ -2304,7 +2817,7 @@ async fn offer_update(
     };
     append_log(state, &format!("Update {version} accepted by user"));
     if update.download.peek().is_none() {
-        update_dialog.set_progress("正在下载或验证更新…", None, false);
+        update_dialog.set_progress("正在下載或驗證更新…", None, false);
     }
     *update.dialog.lock().unwrap() = Some(update_dialog.clone());
     let result = update.download.clone().await;
@@ -2315,8 +2828,8 @@ async fn offer_update(
             update_dialog.close();
             show_error_dialog(
                 app,
-                "Codex Taskboard 更新准备失败",
-                &format!("无法下载或验证更新。请稍后重试。\n\n{error}"),
+                "AutoMate Taskboard 更新準備失敗",
+                &format!("無法下載或驗證更新。請稍後重試。\n\n{error}"),
             );
             finish_update_flow(state, check_update, quit);
             return;
@@ -2332,16 +2845,16 @@ async fn offer_update(
             append_log(state, &format!("Update installation failed: {error}"));
             let service_recovered = state.snapshot.lock().unwrap().child_pid.is_some();
             let service_message = if service_recovered {
-                "任务面板服务已恢复。"
+                "任務面板服務已恢復。"
             } else {
-                "任务面板服务未能恢复，请重新打开 App。"
+                "任務面板服務未能恢復，請重新開啟 App。"
             };
             update_dialog.close();
             show_error_dialog(
                 app,
-                "Codex Taskboard 更新失败",
+                "AutoMate Taskboard 更新失敗",
                 &format!(
-                    "更新未完成。{service_message}\n\n请稍后重试。详情见启动日志。\n\n{error}"
+                    "更新未完成。{service_message}\n\n請稍後重試。詳情見啟動日誌。\n\n{error}"
                 ),
             );
             finish_update_flow(state, check_update, quit);
@@ -2361,9 +2874,18 @@ fn main() {
 
     let app = tauri::Builder::default()
         .enable_macos_default_menu(false)
+        // Amendment 12: must be the first plugin; a second launch focuses the board window instead.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            board_window::request_board_window(app);
+        }))
+        .plugin(
+            tauri_plugin_window_state::Builder::new()
+                .with_state_flags(board_window::window_state_flags())
+                .build(),
+        )
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
-            None,
+            Some(vec![board_window::AUTOSTART_ARG]),
         ))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -2374,39 +2896,39 @@ fn main() {
             let bundled_skill = app
                 .path()
                 .resource_dir()?
-                .join("app/skills/manage-taskboard");
+                .join("app/skills/manage-automate-taskboard");
             let legacy_skill_conflict = reconcile_legacy_skill(&home_directory, &bundled_skill)?;
-            let global_skill = home_directory.join(".agents/skills/manage-taskboard");
+            let global_skill = home_directory.join(".agents/skills/manage-automate-taskboard");
             if global_skill.exists() {
                 fs::remove_dir_all(&global_skill)?;
             }
             copy_directory(&bundled_skill, &global_skill)?;
             #[cfg(target_os = "macos")]
-            let data_directory = home_directory.join("Library/Application Support/Codex Taskboard");
+            let data_directory = home_directory.join("Library/Application Support/AutoMate Taskboard");
             #[cfg(target_os = "macos")]
-            let log_directory = home_directory.join("Library/Logs/Codex Taskboard");
+            let log_directory = home_directory.join("Library/Logs/AutoMate Taskboard");
             #[cfg(target_os = "windows")]
             let data_directory = std::env::var_os("APPDATA")
                 .map(PathBuf::from)
                 .ok_or_else(|| std::io::Error::other("APPDATA is unavailable"))?
-                .join("Codex Taskboard");
+                .join("AutoMate Taskboard");
             #[cfg(target_os = "windows")]
             let log_directory = std::env::var_os("LOCALAPPDATA")
                 .map(PathBuf::from)
                 .ok_or_else(|| std::io::Error::other("LOCALAPPDATA is unavailable"))?
-                .join("Codex Taskboard/Logs");
+                .join("AutoMate Taskboard/Logs");
             #[cfg(target_os = "linux")]
             let data_directory = std::env::var_os("XDG_DATA_HOME")
                 .filter(|value| !value.is_empty())
                 .map(PathBuf::from)
                 .unwrap_or_else(|| home_directory.join(".local/share"))
-                .join("Codex Taskboard");
+                .join("AutoMate Taskboard");
             #[cfg(target_os = "linux")]
             let log_directory = std::env::var_os("XDG_STATE_HOME")
                 .filter(|value| !value.is_empty())
                 .map(PathBuf::from)
                 .unwrap_or_else(|| home_directory.join(".local/state"))
-                .join("Codex Taskboard");
+                .join("AutoMate Taskboard");
             fs::create_dir_all(&data_directory)?;
             fs::create_dir_all(&log_directory)?;
             let Some(instance_lock) = acquire_instance_lock(&data_directory.join("launcher.lock"))?
@@ -2422,6 +2944,7 @@ fn main() {
                 instance_lock,
             ));
             app.manage(state.clone());
+            app.manage(Arc::new(board_window::BoardWindowState::default()));
             #[cfg(target_os = "macos")]
             if let Some(migration) = macos_bundle_migration.as_ref() {
                 if let Err(error) =
@@ -2445,34 +2968,49 @@ fn main() {
             let launcher_status = MenuItem::with_id(
                 app,
                 "launcher-status",
-                "运行状态：启动中",
+                "執行狀態：啟動中",
                 false,
                 None::<&str>,
             )?;
             *state.status_menu.lock().unwrap() = Some(launcher_status.clone());
             let open_taskboard_item =
-                MenuItem::with_id(app, "open-taskboard", "打开任务面板", true, None::<&str>)?;
+                MenuItem::with_id(app, "open-taskboard", "開啟任務面板", true, None::<&str>)?;
+            let open_taskboard_codex = MenuItem::with_id(
+                app,
+                "open-taskboard-codex",
+                "在 Codex 開啟任務面板",
+                true,
+                None::<&str>,
+            )?;
             let open_taskboard_web = MenuItem::with_id(
                 app,
                 "open-taskboard-web",
-                "在网页打开任务面板",
+                "在網頁開啟任務面板",
                 true,
                 None::<&str>,
             )?;
             let check_update =
-                MenuItem::with_id(app, "check-update", "检查更新", true, None::<&str>)?;
+                MenuItem::with_id(app, "check-update", "檢查更新", true, None::<&str>)?;
             let restart_codex =
-                MenuItem::with_id(app, "restart-codex", "重新打开 Codex", true, None::<&str>)?;
+                MenuItem::with_id(app, "restart-codex", "重新開啟 Codex", true, None::<&str>)?;
             let autostart_enabled = app.autolaunch().is_enabled()?;
+            // Amendment 12: entries written by older versions have no --autostart argument;
+            // rewriting an enabled entry adds it (and the current executable path).
+            #[cfg(target_os = "windows")]
+            if autostart_enabled {
+                if let Err(error) = app.autolaunch().enable() {
+                    append_log(&state, &format!("autostart entry refresh failed: {error}"));
+                }
+            }
             let autostart = CheckMenuItem::with_id(
                 app,
                 "autostart",
-                "开机自启动",
+                "開機自動啟動",
                 true,
                 autostart_enabled,
                 None::<&str>,
             )?;
-            let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "結束", true, None::<&str>)?;
             #[cfg(target_os = "macos")]
             let tray_menu = Menu::with_items(
                 app,
@@ -2480,6 +3018,7 @@ fn main() {
                     &app_info,
                     &launcher_status,
                     &open_taskboard_item,
+                    &open_taskboard_codex,
                     &open_taskboard_web,
                     &restart_codex,
                     &check_update,
@@ -2494,6 +3033,7 @@ fn main() {
                     &app_info,
                     &launcher_status,
                     &open_taskboard_item,
+                    &open_taskboard_codex,
                     &open_taskboard_web,
                     &restart_codex,
                     &check_update,
@@ -2505,11 +3045,24 @@ fn main() {
             let quit_menu = quit.clone();
             let autostart_menu = autostart.clone();
             let autostart_confirmed = Arc::new(AtomicBool::new(autostart_enabled));
-            TrayIconBuilder::new()
-                .icon(tauri::include_image!("icons/tray-codex.png"))
-                .icon_as_template(true)
-                .tooltip("Codex Taskboard")
-                .menu(&tray_menu)
+            let tray = TrayIconBuilder::new()
+                .icon(tauri::include_image!("icons/tray.png"))
+                .icon_as_template(false)
+                .tooltip("AutoMate Taskboard")
+                .menu(&tray_menu);
+            // Amendment 12: left click opens the board window; the menu stays on right click (macOS keeps its menu on click).
+            #[cfg(not(target_os = "macos"))]
+            let tray = tray.show_menu_on_left_click(false).on_tray_icon_event(|tray, event| {
+                if let TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                } = event
+                {
+                    board_window::request_board_window(tray.app_handle());
+                }
+            });
+            tray
                 .on_menu_event(move |app, event| match event.id().as_ref() {
                     "check-update" => {
                         let Some(state) = app.try_state::<Arc<LauncherState>>() else {
@@ -2524,6 +3077,9 @@ fn main() {
                         });
                     }
                     "open-taskboard" => {
+                        board_window::request_board_window(app);
+                    }
+                    "open-taskboard-codex" => {
                         let Some(state) = app.try_state::<Arc<LauncherState>>() else {
                             return;
                         };
@@ -2534,8 +3090,8 @@ fn main() {
                                 append_log(&state, &format!("Launcher menu open failed: {error}"));
                                 show_error_dialog(
                                     &app,
-                                    "Codex Taskboard 打开失败",
-                                    &format!("{error}\n\n请确认 Codex 正在运行。"),
+                                    "AutoMate Taskboard 開啟失敗",
+                                    &format!("{error}\n\n請確認 Codex 正在執行。"),
                                 );
                             }
                         });
@@ -2552,7 +3108,7 @@ fn main() {
                                     &state,
                                     &format!("Launcher menu browser open failed: {error}"),
                                 );
-                                show_error_dialog(&app, "Codex Taskboard 网页打开失败", &error);
+                                show_error_dialog(&app, "AutoMate Taskboard 網頁開啟失敗", &error);
                             }
                         });
                     }
@@ -2570,8 +3126,8 @@ fn main() {
                                 );
                                 show_error_dialog(
                                     &app,
-                                    "Codex Taskboard 启动失败",
-                                    &format!("{error}\n\n请确认官方 Codex/ChatGPT App 已安装。"),
+                                    "AutoMate Taskboard 啟動失敗",
+                                    &format!("{error}\n\n請確認官方 Codex/ChatGPT App 已安裝。"),
                                 );
                             }
                         });
@@ -2606,7 +3162,7 @@ fn main() {
                             }
                         };
                         if let Some(error) = operation_error.or(sync_error) {
-                            show_error_dialog(app, "Codex Taskboard 自启动设置失败", &error);
+                            show_error_dialog(app, "AutoMate Taskboard 自動啟動設定失敗", &error);
                         }
                     }
                     "quit" => {
@@ -2654,15 +3210,24 @@ fn main() {
                         Err(error) => {
                             show_error_dialog(
                                 &app_handle,
-                                "Codex Taskboard Skill 更新失败",
-                                &format!("无法保留旧 Skill：{error}"),
+                                "AutoMate Taskboard Skill 更新失敗",
+                                &format!("無法保留舊 Skill：{error}"),
                             );
                             app_handle.exit(1);
                             return;
                         }
                     }
                 }
-                if let Err(error) = start_launcher(&app_handle, &state) {
+                let startup = start_launcher(&app_handle, &state);
+                // Amendment 12: a login (autostart) start stays in the tray; a canceled Codex
+                // restart leaves no service, so nothing is opened either.
+                if startup.is_ok()
+                    && state.child.lock().unwrap().is_some()
+                    && !board_window::is_autostart_launch(std::env::args())
+                {
+                    board_window::request_board_window(&app_handle);
+                }
+                if let Err(error) = startup {
                     append_log(&state, &format!("Launcher startup failed: {error}"));
                     update_snapshot(&app_handle, &state, |snapshot| {
                         snapshot.phase = "error".into();
@@ -2670,12 +3235,17 @@ fn main() {
                     });
                     show_error_dialog(
                         &app_handle,
-                        "Codex Taskboard 启动失败",
+                        "AutoMate Taskboard 啟動失敗",
                         &format!(
-                            "{error}\n\n请确认官方 Codex/ChatGPT App 已安装。详情见启动日志。"
+                            "{error}\n\n請確認官方 Codex/ChatGPT App 已安裝。詳情見啟動日誌。"
                         ),
                     );
                 }
+                #[cfg(target_os = "windows")]
+                let _ = tauri::async_runtime::spawn_blocking(|| {
+                    thread::sleep(SHARED_UPDATE_FIRST_CHECK_DELAY)
+                })
+                .await;
                 offer_update(
                     &app_handle,
                     &state,
@@ -2688,7 +3258,7 @@ fn main() {
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("failed to build Codex Taskboard");
+        .expect("failed to build AutoMate Taskboard");
 
     app.run(|app_handle, event| match event {
         #[cfg(target_os = "macos")]
@@ -2696,13 +3266,17 @@ fn main() {
             let Some(state) = app_handle.try_state::<Arc<LauncherState>>() else {
                 return;
             };
-            let result = start_launcher(app_handle, &state).and_then(|_| open_taskboard(&state));
+            // Amendment 12: Dock reopen shows the board window, like a second launch on Windows.
+            let result = start_launcher(app_handle, &state);
+            if result.is_ok() {
+                board_window::request_board_window(app_handle);
+            }
             if let Err(error) = result {
                 append_log(&state, &format!("Launcher panel reopen failed: {error}"));
                 show_error_dialog(
                     app_handle,
-                    "Codex Taskboard 打开失败",
-                    &format!("{error}\n\n请确认官方 Codex/ChatGPT App 已安装。"),
+                    "AutoMate Taskboard 開啟失敗",
+                    &format!("{error}\n\n請確認官方 Codex/ChatGPT App 已安裝。"),
                 );
             }
         }
@@ -2729,4 +3303,71 @@ fn main() {
         }
         _ => {}
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shell(script: &str) -> StdCommand {
+        #[cfg(target_os = "windows")]
+        {
+            let mut command = windows_command("powershell.exe");
+            command.args(["-NoProfile", "-NonInteractive", "-Command", script]);
+            command
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let mut command = StdCommand::new("sh");
+            command.args(["-c", script]);
+            command
+        }
+    }
+
+    fn piped(mut command: StdCommand) -> std::process::Child {
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn test command")
+    }
+
+    #[test]
+    fn large_piped_output_does_not_block_until_timeout() {
+        let bytes = 512 * 1024;
+        #[cfg(target_os = "windows")]
+        let script = format!("[Console]::Out.Write('x' * {bytes}); [Console]::Error.Write('e' * {bytes})");
+        #[cfg(not(target_os = "windows"))]
+        let script = format!(
+            "head -c {bytes} /dev/zero | tr '\0' x; head -c {bytes} /dev/zero | tr '\0' e >&2"
+        );
+        let started = Instant::now();
+        let output = wait_child_output_with_timeout(piped(shell(&script)), Duration::from_secs(60))
+            .expect("wait")
+            .expect("finished before the timeout");
+        assert!(started.elapsed() < Duration::from_secs(30));
+        assert!(output.status.success());
+        assert_eq!(output.stdout.len(), bytes);
+        assert_eq!(output.stderr.len(), bytes);
+    }
+
+    #[test]
+    fn only_the_explicit_relaunch_lets_the_injector_start_codex_by_itself() {
+        assert_eq!(injector_codex_args(CodexStart::AttachOnly), ["--launch-on-request"]);
+        assert!(injector_codex_args(CodexStart::Relaunch).is_empty());
+    }
+
+    #[test]
+    fn timeout_kills_the_child() {
+        #[cfg(target_os = "windows")]
+        let script = "Start-Sleep -Seconds 30";
+        #[cfg(not(target_os = "windows"))]
+        let script = "sleep 30";
+        let started = Instant::now();
+        let output =
+            wait_child_output_with_timeout(piped(shell(script)), Duration::from_millis(500)).expect("wait");
+        assert!(output.is_none());
+        assert!(started.elapsed() < Duration::from_secs(20));
+    }
 }

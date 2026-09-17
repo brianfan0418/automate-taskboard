@@ -3,10 +3,12 @@ import { Gantt, type GanttStatic, type Task as GanttTask } from "dhtmlx-gantt";
 import "../vendor/dhtmlxgantt.css";
 import type { Task, TaskDraft } from "../types";
 import type { TaskCardPresentation } from "../taskConversations";
-import { useTaskboardI18n } from "../i18n";
+import { isChineseLanguage, useTaskboardI18n } from "../i18n";
+import { CLAUDE_AGENT_MARK_SVG, isClaudeAgentActor } from "./ActorAvatar";
 import { LinearIcon } from "./LinearIcon";
 import { DueDateIcon } from "./SemanticIcons";
 import { taskboardIconSource } from "./TaskboardIcon";
+import { useRootTextScale } from "../textSize";
 
 type GanttZoom = "day" | "week" | "month";
 
@@ -23,6 +25,7 @@ interface TaskboardGanttTask extends GanttTask {
   taskboardTitle: string;
   taskboardUnread: boolean;
   taskboardAssigneeType: Task["assignee"]["type"] | null;
+  taskboardAssigneeId: string;
   taskboardAssigneeName: string;
   taskboardAssigneeAvatarUrl: string | null;
   taskboardAssigneeInitial: string;
@@ -106,6 +109,13 @@ function dateCellClass(date: Date) {
   return classes.join(" ");
 }
 
+const GANTT_ROW_HEIGHT = 58;
+const GANTT_BAR_HEIGHT = 44;
+const GANTT_GROUP_ROW_HEIGHT = 46;
+const GANTT_SCALE_HEIGHT = 66;
+const GANTT_TITLE_MIN_WIDTH = 190;
+const GANTT_ZOOM_COLUMN_WIDTH = { day: 58, week: 42, month: 82 } as const;
+
 export function GanttView({ tasks, presentations, hasActiveFilters, zoom, hideCompleted, todayRequest, onOpenTask, onUpdate }: GanttViewProps) {
   const { language, locale, text } = useTaskboardI18n();
   const i18nRef = useRef({ language, locale, text });
@@ -124,6 +134,11 @@ export function GanttView({ tasks, presentations, hasActiveFilters, zoom, hideCo
   onOpenTaskRef.current = onOpenTask;
   onUpdateRef.current = onUpdate;
   i18nRef.current = { language, locale, text };
+  // W12-B: dhtmlx lays rows out in JS px, so row/bar/scale heights and the title column follow 文字大小 here.
+  const textScale = useRootTextScale();
+  const textScaleRef = useRef(textScale);
+  textScaleRef.current = textScale;
+  const scaled = (value: number) => Math.round(value * textScaleRef.current);
 
   const visibleTasks = useMemo(
     () => hideCompleted ? tasks.filter((task) => task.status !== "done" && task.status !== "canceled") : tasks,
@@ -136,12 +151,12 @@ export function GanttView({ tasks, presentations, hasActiveFilters, zoom, hideCo
     ganttRef.current = instance;
     instance.config.date_format = "%Y-%m-%d";
     instance.config.xml_date = "%Y-%m-%d";
-    instance.config.row_height = 58;
-    instance.config.bar_height = 44;
-    instance.config.scale_height = 66;
+    instance.config.row_height = scaled(GANTT_ROW_HEIGHT);
+    instance.config.bar_height = scaled(GANTT_BAR_HEIGHT);
+    instance.config.scale_height = scaled(GANTT_SCALE_HEIGHT);
     instance.config.scroll_size = 1;
-    instance.config.grid_width = 360;
-    instance.config.min_column_width = 38;
+    instance.config.grid_width = scaled(360);
+    instance.config.min_column_width = scaled(38);
     instance.config.drag_progress = false;
     instance.config.drag_links = false;
     instance.config.show_progress = true;
@@ -156,7 +171,7 @@ export function GanttView({ tasks, presentations, hasActiveFilters, zoom, hideCo
         label: i18nRef.current.text("议题", "Issue"),
         tree: true,
         width: "*",
-        min_width: 190,
+        min_width: scaled(GANTT_TITLE_MIN_WIDTH),
         template: (item) => {
           const task = item as TaskboardGanttTask;
           if (task.taskboardGroup) {
@@ -186,7 +201,9 @@ export function GanttView({ tasks, presentations, hasActiveFilters, zoom, hideCo
         ? `${ganttDate(start, i18nRef.current.locale)} — ${ganttDate(displayEnd, i18nRef.current.locale)}`
         : `${ganttDate(start, i18nRef.current.locale, true)} — ${ganttDate(displayEnd, i18nRef.current.locale, true)}`;
       const avatar = task.taskboardAssigneeType === "agent"
-        ? `<img src="codex-agent-logo.png" alt="">`
+        ? isClaudeAgentActor({ type: "agent", id: task.taskboardAssigneeId })
+          ? CLAUDE_AGENT_MARK_SVG
+          : `<img src="codex-agent-logo.png" alt="">`
         : task.taskboardAssigneeAvatarUrl
         ? `<img src="${escapeHtml(task.taskboardAssigneeAvatarUrl)}" alt="">`
         : `<span>${escapeHtml(task.taskboardAssigneeInitial)}</span>`;
@@ -203,7 +220,7 @@ export function GanttView({ tasks, presentations, hasActiveFilters, zoom, hideCo
     instance.templates.timeline_cell_class = (_item, date) => dateCellClass(date);
     const monthFormat = (date: Date) => new Intl.DateTimeFormat(i18nRef.current.locale, { year: "numeric", month: "long" }).format(date);
     const dayFormat = (date: Date) => {
-      const weekdayLabels = i18nRef.current.language === "zh"
+      const weekdayLabels = isChineseLanguage(i18nRef.current.language)
         ? ["日", "一", "二", "三", "四", "五", "六"]
         : ["S", "M", "T", "W", "T", "F", "S"];
       return `<span class="gantt-scale-date"><span class="gantt-scale-weekday">${weekdayLabels[date.getDay()]}</span><span class="gantt-scale-day">${date.getDate()}</span></span>`;
@@ -212,8 +229,8 @@ export function GanttView({ tasks, presentations, hasActiveFilters, zoom, hideCo
       levels: [
         {
           name: "day",
-          scale_height: 66,
-          min_column_width: 58,
+          scale_height: scaled(GANTT_SCALE_HEIGHT),
+          min_column_width: scaled(GANTT_ZOOM_COLUMN_WIDTH.day),
           scales: [
             { unit: "month", step: 1, format: monthFormat },
             { unit: "day", step: 1, format: dayFormat, css: dateCellClass },
@@ -221,8 +238,8 @@ export function GanttView({ tasks, presentations, hasActiveFilters, zoom, hideCo
         },
         {
           name: "week",
-          scale_height: 66,
-          min_column_width: 42,
+          scale_height: scaled(GANTT_SCALE_HEIGHT),
+          min_column_width: scaled(GANTT_ZOOM_COLUMN_WIDTH.week),
           scales: [
             { unit: "month", step: 1, format: monthFormat },
             { unit: "day", step: 1, format: dayFormat, css: dateCellClass },
@@ -230,8 +247,8 @@ export function GanttView({ tasks, presentations, hasActiveFilters, zoom, hideCo
         },
         {
           name: "month",
-          scale_height: 66,
-          min_column_width: 82,
+          scale_height: scaled(GANTT_SCALE_HEIGHT),
+          min_column_width: scaled(GANTT_ZOOM_COLUMN_WIDTH.month),
           scales: [
             { unit: "year", step: 1, format: (date: Date) => new Intl.DateTimeFormat(i18nRef.current.locale, { year: "numeric" }).format(date) },
             { unit: "month", step: 1, format: (date: Date) => new Intl.DateTimeFormat(i18nRef.current.locale, { month: "short" }).format(date) },
@@ -318,7 +335,7 @@ export function GanttView({ tasks, presentations, hasActiveFilters, zoom, hideCo
     const resizeObserver = new ResizeObserver(([entry]) => {
       const width = entry.contentRect.width;
       const ratio = width >= 1200 ? 0.3 : 0.32;
-      const nextGridWidth = Math.round(Math.max(300, Math.min(460, width * ratio)));
+      const nextGridWidth = Math.round(Math.max(scaled(300), Math.min(scaled(460), width * ratio)));
       expandedGridWidthRef.current = nextGridWidth;
       setGridWidth(nextGridWidth);
       if (!gridCollapsedRef.current) instance.config.grid_width = nextGridWidth;
@@ -364,6 +381,32 @@ export function GanttView({ tasks, presentations, hasActiveFilters, zoom, hideCo
     instance.scrollTo(scroll.x, scroll.y);
   }, [language, locale, text]);
 
+  const appliedTextScaleRef = useRef(textScale);
+  useEffect(() => {
+    const instance = ganttRef.current;
+    if (!instance || appliedTextScaleRef.current === textScale) return;
+    appliedTextScaleRef.current = textScale;
+    instance.config.row_height = scaled(GANTT_ROW_HEIGHT);
+    instance.config.bar_height = scaled(GANTT_BAR_HEIGHT);
+    instance.config.min_column_width = scaled(38);
+    const issueColumn = instance.config.columns.find((column) => column.name === "text");
+    if (issueColumn) issueColumn.min_width = scaled(GANTT_TITLE_MIN_WIDTH);
+    for (const level of instance.ext.zoom.getLevels()) {
+      const name = level.name as keyof typeof GANTT_ZOOM_COLUMN_WIDTH;
+      level.scale_height = scaled(GANTT_SCALE_HEIGHT);
+      if (name in GANTT_ZOOM_COLUMN_WIDTH) level.min_column_width = scaled(GANTT_ZOOM_COLUMN_WIDTH[name]);
+    }
+    const width = containerRef.current?.clientWidth ?? 0;
+    if (width) {
+      const ratio = width >= 1200 ? 0.3 : 0.32;
+      expandedGridWidthRef.current = Math.round(Math.max(scaled(300), Math.min(scaled(460), width * ratio)));
+      setGridWidth(expandedGridWidthRef.current);
+      if (!gridCollapsedRef.current) instance.config.grid_width = expandedGridWidthRef.current;
+    }
+    instance.ext.zoom.setLevel(zoom);
+    instance.render();
+  }, [textScale]);
+
   useEffect(() => {
     const instance = ganttRef.current;
     if (!instance) return;
@@ -391,7 +434,7 @@ export function GanttView({ tasks, presentations, hasActiveFilters, zoom, hideCo
         type: "project",
         open: groupOpenState.get(groupId) ?? group.defaultOpen,
         readonly: true,
-        row_height: 46,
+        row_height: scaled(GANTT_GROUP_ROW_HEIGHT),
         bar_height: 4,
         unscheduled: true,
         progress,
@@ -399,6 +442,7 @@ export function GanttView({ tasks, presentations, hasActiveFilters, zoom, hideCo
         taskboardTitle: groupLabel,
         taskboardUnread: groupTasks.some((task) => presentations[task.id]?.unread),
         taskboardAssigneeType: null,
+        taskboardAssigneeId: "",
         taskboardAssigneeName: "",
         taskboardAssigneeAvatarUrl: null,
         taskboardAssigneeInitial: "",
@@ -413,8 +457,8 @@ export function GanttView({ tasks, presentations, hasActiveFilters, zoom, hideCo
           id: task.id,
           parent: groupId,
           text: task.title,
-          row_height: 58,
-          bar_height: 44,
+          row_height: scaled(GANTT_ROW_HEIGHT),
+          bar_height: scaled(GANTT_BAR_HEIGHT),
           ...(isScheduled ? {
             start_date: localDate(task.startDate!),
             end_date: addDays(localDate(task.dueDate!), 1),
@@ -424,6 +468,7 @@ export function GanttView({ tasks, presentations, hasActiveFilters, zoom, hideCo
           taskboardTitle: task.title,
           taskboardUnread: presentations[task.id]?.unread ?? false,
           taskboardAssigneeType: task.assignee.type,
+          taskboardAssigneeId: task.assignee.id,
           taskboardAssigneeName: task.assignee.name,
           taskboardAssigneeAvatarUrl: task.assignee.avatarUrl,
           taskboardAssigneeInitial: Array.from(task.assignee.name.trim())[0] ?? "·",
@@ -469,7 +514,7 @@ export function GanttView({ tasks, presentations, hasActiveFilters, zoom, hideCo
     }
     if (restoredViewport) pendingDetailViewport = null;
     hasParsedDataRef.current = true;
-  }, [presentations, visibleTasks]);
+  }, [presentations, visibleTasks, textScale]);
 
   useEffect(() => {
     ganttRef.current?.ext.zoom.setLevel(zoom);

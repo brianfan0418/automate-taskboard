@@ -457,7 +457,7 @@ function listSkills(codexExecutable, workspacePath, processEnv) {
         id: 1,
         method: "initialize",
         params: {
-          clientInfo: { name: "codex-taskboard", version: "0.1.0" },
+          clientInfo: { name: "automate-taskboard", version: "0.1.0" },
           capabilities: { experimentalApi: true },
         },
       });

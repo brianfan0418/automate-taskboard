@@ -1,7 +1,12 @@
 import { createRoot } from "react-dom/client";
 
 import { TaskEditor, type NewTaskEditorDraft } from "../../web/src/components/TaskEditor";
+import { getTaskboardI18n, TaskboardLanguageProvider, type TaskboardLanguage } from "../../web/src/i18n";
 import type { ActorIdentity, TaskDraft } from "../../web/src/types";
+
+// Render in the product's default UI language and find the submit button by its localized label.
+const language: TaskboardLanguage = "zh-TW";
+const createIssueLabel = getTaskboardI18n(language).text("创建议题", "Create issue");
 
 const currentUser: ActorIdentity = {
   type: "user",
@@ -21,7 +26,6 @@ const oldTodoDraft: NewTaskEditorDraft = {
   startDate: "",
   dueDate: "",
   recurrence: null,
-  attachments: [],
   relations: {
     parentId: null,
     relatedIds: [],
@@ -34,25 +38,28 @@ function publishResult(draft: TaskDraft) {
 }
 
 createRoot(document.getElementById("root")!).render(
-  <TaskEditor
-    task={null}
-    tasks={[]}
-    initialStatus="in_progress"
-    initialDraft={oldTodoDraft}
-    labels={["回归证据"]}
-    currentUser={currentUser}
-    developmentScan={{ workspacePath: null, contexts: [] }}
-    developmentScanLoading={false}
-    onCreateLabel={async () => {}}
-    onCancel={() => {}}
-    onSave={async (draft) => publishResult(draft)}
-  />,
+  <TaskboardLanguageProvider language={language}>
+    <TaskEditor
+      projectId={null}
+      tasks={[]}
+      referenceTasks={[]}
+      initialStatus="in_progress"
+      initialDraft={oldTodoDraft}
+      labels={["回归证据"]}
+      currentUser={currentUser}
+      developmentScan={{ workspacePath: null, contexts: [] }}
+      developmentScanLoading={false}
+      onCreateLabel={async () => {}}
+      onCancel={() => {}}
+      onSave={async (draft) => publishResult(draft)}
+    />
+  </TaskboardLanguageProvider>,
 );
 
 requestAnimationFrame(() => {
   requestAnimationFrame(() => {
     const createButton = [...document.querySelectorAll("button")]
-      .find((button) => button.textContent === "Create issue");
+      .find((button) => button.textContent === createIssueLabel);
     if (!(createButton instanceof HTMLButtonElement)) {
       document.documentElement.dataset.error = "create button not found";
       return;

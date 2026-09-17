@@ -1,7 +1,7 @@
 [package]
-name = "codex-taskboard-launcher"
-version = "1.1.23"
-description = "Codex Taskboard launcher"
+name = "automate-taskboard-launcher"
+version = "2.0.4"
+description = "AutoMate Taskboard launcher"
 edition = "2021"
 rust-version = "1.88"
 
@@ -17,7 +17,9 @@ sha2 = "0.10"
 tauri = { version = "2.11.5", features = ["tray-icon"] }
 tauri-plugin-autostart = "2.5.1"
 tauri-plugin-dialog = "2.7.2"
+tauri-plugin-single-instance = "2.4.4"
 tauri-plugin-updater = "2.10.1"
+tauri-plugin-window-state = "2.4.1"
 uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -27,4 +29,4 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_RestartManager", "Win32_System_Threading"] }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_RestartManager", "Win32_System_Threading"] }

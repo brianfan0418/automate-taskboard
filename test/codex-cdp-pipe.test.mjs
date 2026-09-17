@@ -11,22 +11,22 @@ import {
 test("the development TCP bridge accepts only its exact loopback page endpoint", () => {
   assert.equal(
     validatedLoopbackCdpWebSocketUrl(
-      "ws://127.0.0.1:9231/devtools/page/target-id",
-      9231,
+      "ws://127.0.0.1:9241/devtools/page/target-id",
+      9241,
     ),
-    "ws://127.0.0.1:9231/devtools/page/target-id",
+    "ws://127.0.0.1:9241/devtools/page/target-id",
   );
   assert.throws(
     () => validatedLoopbackCdpWebSocketUrl(
       "ws://127.0.0.1:9232/devtools/page/target-id",
-      9231,
+      9241,
     ),
     /Rejected unexpected Codex CDP target URL/,
   );
   assert.throws(
     () => validatedLoopbackCdpWebSocketUrl(
-      "ws://example.com:9231/devtools/page/target-id",
-      9231,
+      "ws://example.com:9241/devtools/page/target-id",
+      9241,
     ),
     /Rejected unexpected Codex CDP target URL/,
   );

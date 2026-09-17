@@ -89,7 +89,7 @@ async function manifest(root, relative = "") {
 }
 
 verifyNode(appPath);
-const launcherPath = path.join(appPath, "Contents", "MacOS", "codex-taskboard-launcher");
+const launcherPath = path.join(appPath, "Contents", "MacOS", "automate-taskboard-launcher");
 for (const targetPath of [launcherPath, appPath]) {
   run("/usr/bin/codesign", [
     "--force",
@@ -102,10 +102,10 @@ for (const targetPath of [launcherPath, appPath]) {
 run("/usr/bin/codesign", ["--verify", "--deep", "--strict", "--verbose=2", appPath]);
 verifyNode(appPath);
 
-const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "codex-taskboard-preflight."));
+const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "automate-taskboard-preflight."));
 let mountedDmg = null;
 try {
-  const archivePath = path.join(temporaryRoot, "Codex.Taskboard.preflight.app.tar.gz");
+  const archivePath = path.join(temporaryRoot, "AutoMate.Taskboard.preflight.app.tar.gz");
   run("/usr/bin/tar", ["-czf", archivePath, path.basename(appPath)], {
     cwd: path.dirname(appPath),
   });
@@ -129,7 +129,7 @@ try {
   run("/usr/bin/codesign", ["--verify", "--deep", "--strict", "--verbose=2", extractedApp]);
   verifyNode(extractedApp);
 
-  const dmgPath = path.join(temporaryRoot, "Codex.Taskboard.preflight.dmg");
+  const dmgPath = path.join(temporaryRoot, "AutoMate.Taskboard.preflight.dmg");
   const dmgSource = path.join(temporaryRoot, "dmg-source");
   run("/bin/mkdir", ["-p", dmgSource]);
   run("/usr/bin/ditto", [appPath, path.join(dmgSource, path.basename(appPath))]);

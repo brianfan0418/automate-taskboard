@@ -21,7 +21,7 @@ afterEach(async () => {
 });
 
 async function startServer(configure, listenOptions = {}) {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-taskboard-test-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "automate-taskboard-test-"));
   const options = configure ? await configure(directory) : {};
   const app = createTaskboardServer({ dataDirectory: directory, ...options });
   const address = await app.listen({ port: 0, ...listenOptions });
@@ -101,7 +101,7 @@ async function openWebSocket(url, headers) {
 test("health and the default local project are available", async () => {
   let skillPath;
   const baseUrl = await startServer(async (directory) => {
-    skillPath = path.join(directory, "skills", "manage-taskboard", "SKILL.md");
+    skillPath = path.join(directory, "skills", "manage-automate-taskboard", "SKILL.md");
     return { skillPath };
   });
 
@@ -136,10 +136,10 @@ test("launcher mode proves service identity and hides every route behind its ins
   assert.equal(unauthenticatedHealth.response.status, 401);
 
   const health = await request(baseUrl, "/health", {
-    headers: { "x-codex-taskboard-challenge": challenge },
+    headers: { "x-automate-taskboard-challenge": challenge },
   });
   assert.equal(health.response.status, 200);
-  assert.equal(health.body.product, "codex-taskboard");
+  assert.equal(health.body.product, "automate-taskboard");
   assert.equal(health.body.version, version);
   assert.equal(
     health.body.proof,
@@ -434,15 +434,15 @@ test("accepts private LAN requests and rejects public Host and Origin headers", 
   });
   assert.equal(codexOriginResult.response.status, 200);
 
-  const lanHostResult = await requestWithHost(baseUrl, "192.168.1.24:47823");
+  const lanHostResult = await requestWithHost(baseUrl, "192.168.50.24:47833");
   assert.equal(lanHostResult.status, 200);
 
   const lanOriginResult = await request(baseUrl, "/health", {
-    headers: { origin: "http://192.168.1.24:47823" },
+    headers: { origin: "http://192.168.50.24:47833" },
   });
   assert.equal(lanOriginResult.response.status, 200);
 
-  const localHostnameResult = await requestWithHost(baseUrl, "taskboard.local:47823");
+  const localHostnameResult = await requestWithHost(baseUrl, "taskboard.local:47833");
   assert.equal(localHostnameResult.status, 200);
 
   const hostResult = await requestWithHost(baseUrl, "taskboard.example.com");
@@ -522,7 +522,7 @@ test("trusted HTTPS origins do not inherit device-local capabilities from tunnel
   const trustedOrigin = "https://board.example.test";
   let skillPath;
   const baseUrl = await startServer(async (directory) => {
-    skillPath = path.join(directory, "skills", "manage-taskboard", "SKILL.md");
+    skillPath = path.join(directory, "skills", "manage-automate-taskboard", "SKILL.md");
     return {
       skillPath,
       processEnv: { ...process.env, CODEX_TASKBOARD_TRUSTED_ORIGINS: trustedOrigin },
@@ -598,7 +598,7 @@ test("trusted HTTPS origins do not inherit device-local capabilities from tunnel
 });
 
 test("trusted HTTPS origins apply to cloud WebSocket upgrades without widening loopback routes", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-taskboard-trusted-origins-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "automate-taskboard-trusted-origins-"));
   const trustedOrigin = "https://board.example.test";
   const upstreamServer = createServer();
   const upstreamWebSockets = new WebSocketServer({ noServer: true });
@@ -680,13 +680,16 @@ test("trusted origin configuration rejects non-origin URLs", () => {
 test("project and task CRUD flow", async () => {
   const baseUrl = await startServer();
 
+  // W15: the project folder must exist on this machine.
+  const websiteFolder = await mkdtemp(path.join(os.tmpdir(), "taskboard-website-"));
   const projectResult = await request(baseUrl, "/api/projects", {
     method: "POST",
-    body: { id: "website", name: "Website", workspacePath: "/work/website" },
+    body: { id: "website", name: "Website", workspacePath: websiteFolder },
   });
   assert.equal(projectResult.response.status, 201);
   assert.equal(projectResult.body.project.id, "website");
-  assert.equal(projectResult.body.project.workspacePath, "/work/website");
+  assert.equal(projectResult.body.project.workspacePath, websiteFolder);
+  await rm(websiteFolder, { recursive: true, force: true });
 
   const createResult = await request(baseUrl, "/api/tasks", {
     method: "POST",
@@ -1741,8 +1744,8 @@ test("request boundaries reject unknown fields and invalid values", async () => 
 test("task changes from one LAN client are broadcast to another client", async () => {
   const baseUrl = await startServer(undefined, { host: "0.0.0.0" });
   const lanHeaders = {
-    host: "192.168.1.24:47823",
-    origin: "http://192.168.1.24:47823",
+    host: "192.168.50.24:47833",
+    origin: "http://192.168.50.24:47833",
   };
   const eventResponse = await fetch(`${baseUrl}/api/events`, { headers: lanHeaders });
   assert.equal(eventResponse.status, 200);

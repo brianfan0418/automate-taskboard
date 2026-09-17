@@ -1,0 +1,30 @@
+AutoMate Taskboard
+
+This product is a modified version of Dashi Taskboard
+(https://github.com/chuspeeism/dashi-taskboard), licensed under the
+Apache License, Version 2.0. Copyright for the original work belongs to
+its authors and contributors.
+
+Changes made in this version, as required by section 4(b) of the
+Apache License 2.0:
+
+- Renamed the application to AutoMate Taskboard, with its own
+  application identifier and data directories so it can be installed
+  next to Dashi Taskboard.
+- Added agent runs: issues can be assigned to Codex or Claude Code,
+  started, stopped and steered from the board, with an auto-claim
+  scheduler for queued issues.
+- Added phone access over Tailscale with device pairing, and a mobile
+  board layout.
+- Added self-update for Windows builds from a shared folder, with
+  ed25519-signed update manifests and the related key generation and
+  publishing scripts.
+- Added a Traditional Chinese (zh-TW) interface, project folder
+  selection, issue import, and Windows process-management changes to
+  the launcher and installer.
+- Removed upstream release, signing and update-source settings that
+  point to the upstream project's accounts; placeholders are used
+  instead.
+
+This version is not affiliated with or endorsed by the authors of
+Dashi Taskboard.

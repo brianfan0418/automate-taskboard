@@ -23,7 +23,7 @@ const baseRequest = {
   codexHostId: "local",
   projectName: "PPT Skill",
   workspacePath: "/Users/example/Documents/ppt-skill",
-  skillPath: "/Users/example/taskboard/skills/manage-taskboard/SKILL.md",
+  skillPath: "/Users/example/taskboard/skills/manage-automate-taskboard/SKILL.md",
   enabledByUser: true,
   quotaAware: false,
   intervalMinutes: 5,
@@ -132,15 +132,15 @@ test("the automation host request accepts catalog-provided project automation op
 test("the stable name and generated prompt are project-scoped and encode the claim protocol", () => {
   assert.equal(
     buildTaskboardAutomationName(baseRequest),
-    "Taskboard 自动认领 · ppt-skill",
+    "AutoMate Taskboard 自动认领 · ppt-skill",
   );
 
   const prompt = buildTaskboardAutomationPrompt(baseRequest);
   assert.match(
     prompt,
-    /\[\$manage-taskboard\]\(\/Users\/example\/taskboard\/skills\/manage-taskboard\/SKILL\.md\)/,
+    /\[\$manage-automate-taskboard\]\(\/Users\/example\/taskboard\/skills\/manage-automate-taskboard\/SKILL\.md\)/,
   );
-  assert.match(prompt, /\[\$manage-taskboard\]\([^)]*\) e-taskboard /);
+  assert.match(prompt, /\[\$manage-automate-taskboard\]\([^)]*\) e-taskboard /);
   assert.match(prompt, /PPT Skill/);
   assert.match(prompt, /每 5 分钟检查/);
   assert.match(prompt, /ppt-skill/);
@@ -206,7 +206,7 @@ test("the remote automation prompt keeps taskctl local and delegates work to the
 
 test("the generated automation command uses the packaged CLI and an argv runtime file", () => {
   const previous = process.env.CODEX_TASKBOARD_RUNTIME_FILE;
-  process.env.CODEX_TASKBOARD_RUNTIME_FILE = "/Users/example/Library/Application Support/Codex Taskboard/launcher-runtime.json";
+  process.env.CODEX_TASKBOARD_RUNTIME_FILE = "/Users/example/Library/Application Support/AutoMate Taskboard/launcher-runtime.json";
   try {
     const prompt = buildTaskboardAutomationPrompt(baseRequest);
     const cliPath = fileURLToPath(new URL("../cli/taskctl.mjs", import.meta.url));
@@ -227,7 +227,7 @@ test("the generated automation command uses the packaged CLI and an argv runtime
 test("the generated cron spec uses the selected whitelisted local Codex options", () => {
   assert.deepEqual(buildTaskboardAutomationSpec(baseRequest), {
     kind: "cron",
-    name: "Taskboard 自动认领 · ppt-skill",
+    name: "AutoMate Taskboard 自动认领 · ppt-skill",
     prompt: buildTaskboardAutomationPrompt(baseRequest),
     projectId: "codex-project-123",
     executionEnvironment: "local",
@@ -250,7 +250,7 @@ test("the generated cron spec uses the selected whitelisted local Codex options"
   });
   assert.deepEqual(buildTaskboardAutomationSpec(remoteRequest), {
     kind: "cron",
-    name: "Taskboard 自动认领 · ppt-skill",
+    name: "AutoMate Taskboard 自动认领 · ppt-skill",
     prompt: buildTaskboardAutomationPrompt(remoteRequest),
     projectId: null,
     executionEnvironment: "local",
@@ -317,7 +317,7 @@ test("ensure-active updates a matching automation by id with a complete active s
     id: "automation-1",
     status: "ACTIVE",
     kind: "cron",
-    name: "Taskboard 自动认领 · ppt-skill",
+    name: "AutoMate Taskboard 自动认领 · ppt-skill",
     prompt: "old prompt",
     projectId: "old-project",
     executionEnvironment: "local",

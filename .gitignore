@@ -14,3 +14,6 @@ src-tauri/binaries/
 src-tauri/gen/
 src-tauri/resources/
 src-tauri/target/
+# Amendment 11: update signing keys live outside the repository; never commit one by accident.
+*.pem
+_secrets/

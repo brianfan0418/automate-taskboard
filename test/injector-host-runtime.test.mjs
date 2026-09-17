@@ -19,7 +19,7 @@ const currentAutomationRequest = {
   codexHostId: "local",
   projectName: "Local",
   workspacePath: "/tmp/project",
-  skillPath: "/tmp/manage-taskboard/SKILL.md",
+  skillPath: "/tmp/manage-automate-taskboard/SKILL.md",
   intervalMinutes: 10,
   model: "gpt-5.6-sol",
   reasoningEffort: "ultra",
@@ -62,7 +62,7 @@ test("frame loading and external links require bounded authenticated values", as
     payload: JSON.stringify({
       id: "load-request-1",
       action: "load-frame",
-      frameName: "codex-taskboard-8f99fbb3-12d4-48af-8938-89f993fab008",
+      frameName: "automate-taskboard-8f99fbb3-12d4-48af-8938-89f993fab008",
       frameCapability: "30c3d0c4-aa0f-4169-93c0-bb3da20bc654",
     }),
     executionContextId: 12,
@@ -128,7 +128,7 @@ test("a stale automation parser receives an immediate host error instead of timi
   assert.deepEqual(responses, [{
     id: currentAutomationRequest.id,
     ok: false,
-    error: "自动认领配置暂时无法应用，请刷新后重试",
+    error: "自動認領設定暫時無法套用，請重新整理後重試",
     diagnosticCode: "AUTOMATION_SCHEMA_MISMATCH",
   }]);
 });
@@ -203,15 +203,15 @@ test("attach is idempotent for the same source hash and does not open a closed p
 });
 
 test("resident discovery accepts this repository's absolute and relative launch forms only", () => {
-  const projectRoot = "/workspace/codex-taskboard";
+  const projectRoot = "/workspace/automate-taskboard";
   const injectorPath = `${projectRoot}/scripts/codex-injector.mjs`;
   const processList = [
-    `101 node ${injectorPath} --watch --port 9231`,
+    `101 node ${injectorPath} --watch --port 9241`,
     "102 node scripts/codex-injector.mjs --watch",
-    "103 node ./scripts/codex-injector.mjs --watch --port=9231",
+    "103 node ./scripts/codex-injector.mjs --watch --port=9241",
     "104 node scripts/codex-injector.mjs --watch",
-    `105 node ${injectorPath} --watch --port 9229`,
-    `106 node ${injectorPath} --port 9231`,
+    `105 node ${injectorPath} --watch --port 9239`,
+    `106 node ${injectorPath} --port 9241`,
   ].join("\n");
   const cwdByPid = new Map([
     [102, projectRoot],
@@ -224,8 +224,8 @@ test("resident discovery accepts this repository's absolute and relative launch 
     currentPid: 999,
     injectorPath,
     projectRoot,
-    port: 9231,
-    defaultPort: 9229,
+    port: 9241,
+    defaultPort: 9239,
     cwdForPid: (pid) => cwdByPid.get(pid) ?? null,
   }), [101, 103]);
   assert.deepEqual(findResidentInjectorPids({
@@ -233,8 +233,8 @@ test("resident discovery accepts this repository's absolute and relative launch 
     currentPid: 999,
     injectorPath,
     projectRoot,
-    port: 9229,
-    defaultPort: 9229,
+    port: 9239,
+    defaultPort: 9239,
     cwdForPid: (pid) => cwdByPid.get(pid) ?? null,
   }), [102, 105]);
 });
@@ -242,7 +242,7 @@ test("resident discovery accepts this repository's absolute and relative launch 
 test("refresh stops every stale resident before starting one token-verified replacement", async () => {
   const calls = [];
   const startupToken = "replacement-token";
-  const replacement = await restartResidentInjector(9231, {
+  const replacement = await restartResidentInjector(9241, {
     findResidents: () => [4321, 5432],
     stopResident: async (pid) => calls.push(["stop", pid]),
     createStartupToken: () => startupToken,
@@ -261,7 +261,7 @@ test("refresh stops every stale resident before starting one token-verified repl
   assert.deepEqual(calls, [
     ["stop", 4321],
     ["stop", 5432],
-    ["start", 9231, startupToken],
-    ["ready", 9231, 9876, startupToken],
+    ["start", 9241, startupToken],
+    ["ready", 9241, 9876, startupToken],
   ]);
 });

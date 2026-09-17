@@ -1,0 +1,29 @@
+[
+  {
+    "pid": 41000,
+    "sessionId": "5e551017-0000-4000-8000-000000000001",
+    "name": "desktop interactive session",
+    "status": "idle",
+    "kind": "interactive"
+  },
+  {
+    "id": "0a1d5e55",
+    "cwd": "__CWD__",
+    "kind": "background",
+    "startedAt": 1789584419865,
+    "sessionId": "0a1d5e55-0000-4000-8000-000000000002",
+    "name": "__TITLE__",
+    "state": "done"
+  },
+  {
+    "pid": 42000,
+    "id": "d1ff0001",
+    "cwd": "C:\\Somewhere\\Else",
+    "kind": "background",
+    "startedAt": 1789584422302,
+    "sessionId": "d1ff0001-0000-4000-8000-000000000003",
+    "name": "unrelated",
+    "status": "idle",
+    "state": "done"
+  }
+]

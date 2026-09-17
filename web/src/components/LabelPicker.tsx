@@ -173,7 +173,7 @@ export function LabelPicker({
                       type="button"
                       className="label-delete-button"
                       disabled={disabled || pendingLabel !== null}
-                      aria-label={text(`删除标签 ${presentation.name}`, `Delete label ${presentation.name}`)}
+                      aria-label={text(`删除标签 ${presentation.name}`, `Delete label ${presentation.name}`, `刪除標籤 ${presentation.name}`)}
                       title={text("删除标签", "Delete label")}
                       onClick={() => void deleteLabel(label)}
                     >
@@ -194,7 +194,7 @@ export function LabelPicker({
                     ? labelPresentation(normalizedSearch, language).color
                     : "transparent",
                 }} />
-                <span>{text(`创建 “${normalizedSearch}”`, `Create “${normalizedSearch}”`)}</span>
+                <span>{text(`创建 “${normalizedSearch}”`, `Create “${normalizedSearch}”`, `建立「${normalizedSearch}」`)}</span>
               </button>
             )}
           </div>

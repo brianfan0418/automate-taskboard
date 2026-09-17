@@ -89,7 +89,7 @@ export function parseTaskboardAutomationHostRequest(value) {
 }
 
 export function buildTaskboardAutomationName(request) {
-  return `Taskboard 自动认领 · ${request.taskboardProjectId}`;
+  return `AutoMate Taskboard 自动认领 · ${request.taskboardProjectId}`;
 }
 
 export function buildTaskboardAutomationPrompt(request) {
@@ -124,7 +124,7 @@ export function buildTaskboardAutomationPrompt(request) {
         "执行完成并验证后，先用 comment add 记录关键改动、验证结果、执行结果和剩余风险，再使用 ownedVersion、显式 --if-version 和认领时保存的完整 binding 将议题移动到 in_review；成功后更新 ownedVersion。不要省略 binding，避免把完整绑定降级为 legacy local；不要直接标记为 done。",
       ];
   return [
-    `[$manage-taskboard](${request.skillPath}) e-taskboard 每 ${request.intervalMinutes} 分钟检查任务面板中的「${request.projectName}」项目（项目 ID：${request.taskboardProjectId}，项目目录：${request.workspacePath}）。`,
+    `[$manage-automate-taskboard](${request.skillPath}) e-taskboard 每 ${request.intervalMinutes} 分钟检查任务面板中的「${request.projectName}」项目（项目 ID：${request.taskboardProjectId}，项目目录：${request.workspacePath}）。`,
     `本轮所有 taskctl 操作都使用完整命令前缀 ${taskctlCommand}，不要使用 PATH 中的 taskctl。`,
     `开始时先运行 ${taskctlCommand} issue list --project ${request.taskboardProjectId} --status todo --json。若没有 todo，直接结束；Taskboard 主机侧会暂停当前自动化，不要创建或打开新的任务会话。`,
     ...executionInstructions,

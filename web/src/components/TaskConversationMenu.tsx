@@ -12,7 +12,7 @@ interface TaskConversationMenuProps {
 
 function conversationSource(
   conversation: TaskConversationItem,
-  text: (chinese: string, english: string) => string,
+  text: (chinese: string, english: string, taiwanese?: string) => string,
 ) {
   if (conversation.kind === "local-ai") return text("内置 AI", "Built-in AI");
   return conversation.source === "comment"
@@ -22,7 +22,7 @@ function conversationSource(
 
 function conversationStatus(
   conversation: TaskConversationItem,
-  text: (chinese: string, english: string) => string,
+  text: (chinese: string, english: string, taiwanese?: string) => string,
 ) {
   if (conversation.currentRun?.status === "running") {
     if (conversation.latestTodo?.total) {
@@ -100,12 +100,12 @@ export function TaskConversationMenu({
         type="button"
         draggable={false}
         aria-label={multiple
-          ? text(`查看 ${conversations.length} 个对话`, `View ${conversations.length} conversations`)
-          : text(`打开对话 ${conversations[0].title}`, `Open conversation ${conversations[0].title}`)}
+          ? text(`查看 ${conversations.length} 个对话`, `View ${conversations.length} conversations`, `檢視 ${conversations.length} 個對話`)
+          : text(`打开对话 ${conversations[0].title}`, `Open conversation ${conversations[0].title}`, `開啟對話 ${conversations[0].title}`)}
         aria-haspopup={multiple ? "menu" : undefined}
         aria-expanded={multiple ? open : undefined}
         title={multiple
-          ? text(`${conversations.length} 个对话`, `${conversations.length} conversations`)
+          ? text(`${conversations.length} 个对话`, `${conversations.length} conversations`, `${conversations.length} 個對話`)
           : conversations[0].title}
         onPointerDown={stop}
         onDragStart={(event) => event.preventDefault()}

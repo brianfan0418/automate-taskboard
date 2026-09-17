@@ -91,7 +91,7 @@ function verifyApp(targetPath) {
   if (!signingDetails(targetPath).includes(`TeamIdentifier=${releasePolicy.appleTeamId}`)) {
     throw new Error(`App does not use Apple Team ${releasePolicy.appleTeamId}`);
   }
-  const launcherPath = path.join(targetPath, "Contents", "MacOS", "codex-taskboard-launcher");
+  const launcherPath = path.join(targetPath, "Contents", "MacOS", "automate-taskboard-launcher");
   const embeddedVersion = spawnSync(
     "/usr/bin/grep",
     ["-a", "-F", "-q", releaseVersion, launcherPath],
@@ -154,7 +154,7 @@ await verifyUpdaterSignature({
 
 const latest = JSON.parse(await readFile(path.join(releaseDirectory, "latest.json"), "utf8"));
 if (latest.version !== releaseVersion) throw new Error("latest.json version is incorrect");
-const expectedUrl = `https://github.com/chuspeeism/dashi-taskboard/releases/download/${releaseTag}/${artifactName}`;
+const expectedUrl = `https://github.com/brianfan0418/automate-taskboard/releases/download/${releaseTag}/${artifactName}`;
 const expectedPlatforms = [
   "darwin-aarch64",
   "darwin-x86_64",
@@ -181,7 +181,7 @@ if (!signingDetails(dmgPath).includes(`TeamIdentifier=${releasePolicy.appleTeamI
   throw new Error(`DMG does not use Apple Team ${releasePolicy.appleTeamId}`);
 }
 
-const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "codex-taskboard-release-verify."));
+const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "automate-taskboard-release-verify."));
 let mountedDmg = null;
 try {
   const updaterDirectory = path.join(temporaryRoot, "updater");

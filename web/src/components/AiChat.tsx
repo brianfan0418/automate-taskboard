@@ -69,6 +69,7 @@ import type {
   ComposerSkillCandidate,
   ComposerSlashActionCandidate,
   ComposerTrigger,
+  ComposerTurnIntent,
 } from "../types";
 import { COMPOSER_CONTRACT_VERSION } from "../types";
 import { LinearIcon } from "./LinearIcon";
@@ -88,6 +89,8 @@ import {
   WorkspaceWritePermissionIcon,
 } from "./SemanticIcons";
 import { TaskboardIcon } from "./TaskboardIcon";
+import { newClientId } from "../clientId";
+import { readRootTextScale, useRootTextScale } from "../textSize";
 
 export type AiChatOpenThreadRequest = {
   threadId: string;
@@ -96,6 +99,8 @@ export type AiChatOpenThreadRequest = {
   projectId: string;
   issueId: string | null;
   composerText: string;
+  /** Import fix F2: the turn sent from this draft asks the server to select the board skill. */
+  intent?: ComposerTurnIntent;
   requestId: number;
 };
 
@@ -196,7 +201,7 @@ const PANEL_DEFAULT_GEOMETRY: PanelGeometry = {
 };
 const SKILL_MARKER = AI_CHAT_SKILL_MARKER;
 const SKILL_LINK_PREFIX = "#ai-chat-skill-";
-const COMPOSER_FRAGMENT_MIME = "application/x-codex-taskboard-composer-fragment";
+const COMPOSER_FRAGMENT_MIME = "application/x-automate-taskboard-composer-fragment";
 const COMPOSER_HTML_BLOCKS = new Set([
   "ADDRESS",
   "ARTICLE",
@@ -220,34 +225,44 @@ const SANDBOX_LABELS: Record<AiChatSandbox, readonly [string, string]> = {
   "danger-full-access": ["完全访问权限", "Full access"],
 };
 
+/** Resize bounds in px; the 16px-based constants follow 文字大小 like the rem-based panel CSS (W12-B). */
+function panelBounds() {
+  const scale = readRootTextScale();
+  const edgeGap = PANEL_EDGE_GAP * scale;
+  const maxWidth = Math.min(PANEL_MAX_WIDTH * scale, window.innerWidth - edgeGap * 2);
+  const minWidth = Math.min(PANEL_MIN_WIDTH * scale, maxWidth);
+  const maxHeight = window.innerHeight - edgeGap * 2;
+  const minHeight = Math.min(PANEL_MIN_HEIGHT * scale, maxHeight);
+  return { maxWidth, minWidth, maxHeight, minHeight };
+}
+
 function clampPanelGeometry(geometry: PanelGeometry): PanelGeometry {
-  const maxWidth = Math.min(
-    PANEL_MAX_WIDTH,
-    window.innerWidth - PANEL_EDGE_GAP * 2,
-  );
-  const minWidth = Math.min(PANEL_MIN_WIDTH, maxWidth);
-  const maxHeight = window.innerHeight - PANEL_EDGE_GAP * 2;
-  const minHeight = Math.min(PANEL_MIN_HEIGHT, maxHeight);
+  const { maxWidth, minWidth, maxHeight, minHeight } = panelBounds();
   return {
     width: Math.min(maxWidth, Math.max(minWidth, geometry.width)),
     height: Math.min(maxHeight, Math.max(minHeight, geometry.height)),
   };
 }
 
+function scaledDefaultGeometry(): PanelGeometry {
+  const scale = readRootTextScale();
+  return { width: PANEL_DEFAULT_GEOMETRY.width * scale, height: PANEL_DEFAULT_GEOMETRY.height * scale };
+}
+
 function loadPanelGeometry(): PanelGeometry {
   const stored = taskboardStorage.getItem(PANEL_GEOMETRY_KEY);
-  if (!stored) return clampPanelGeometry(PANEL_DEFAULT_GEOMETRY);
+  if (!stored) return clampPanelGeometry(scaledDefaultGeometry());
   try {
     const geometry = JSON.parse(stored) as PanelGeometry;
     if (
       !Number.isFinite(geometry.width)
       || !Number.isFinite(geometry.height)
     ) {
-      return clampPanelGeometry(PANEL_DEFAULT_GEOMETRY);
+      return clampPanelGeometry(scaledDefaultGeometry());
     }
     return clampPanelGeometry(geometry);
   } catch {
-    return clampPanelGeometry(PANEL_DEFAULT_GEOMETRY);
+    return clampPanelGeometry(scaledDefaultGeometry());
   }
 }
 
@@ -871,7 +886,7 @@ function parsedTodoLines(value: unknown): string[] {
 
 function activityDetail(
   event: AiChatEvent,
-  text: (chinese: string, english: string) => string,
+  text: (chinese: string, english: string, taiwanese?: string) => string,
 ): ThinkingActivityDetail | null {
   const files = event.data?.files;
   if (Array.isArray(files)) {
@@ -901,7 +916,7 @@ function activityDetail(
 
 function activityDetailSummary(
   event: AiChatEvent,
-  text: (chinese: string, english: string) => string,
+  text: (chinese: string, english: string, taiwanese?: string) => string,
 ): string {
   if (typeof event.data?.output === "string" && event.data.output.trim()) return text("查看输出", "View output");
   if (typeof event.data?.command === "string" && event.data.command.trim()) return text("查看命令", "View command");
@@ -1056,12 +1071,14 @@ function ThinkingSteps({
                 ? text(
                   `${detail.value.length} 个文件`,
                   `${detail.value.length} ${detail.value.length === 1 ? "file" : "files"}`,
+                  `${detail.value.length} 個檔案`,
                 )
                 : detail?.kind === "lines"
                   && (event.type === "todo" || event.type === "todo_list")
                   ? text(
                     `${detail.value.length} 项任务`,
                     `${detail.value.length} ${detail.value.length === 1 ? "task" : "tasks"}`,
+                    `${detail.value.length} 項任務`,
                   )
                   : event.content.trim();
               return (
@@ -1292,6 +1309,7 @@ export function AiChat({
   const handledOpenThreadRequestRef = useRef<number | null>(null);
   const draftReturnThreadIdRef = useRef<string | null>(null);
   const taskComposerDraftOriginRef = useRef<DraftThreadOrigin | null>(null);
+  const composerIntentRef = useRef<ComposerTurnIntent | null>(null);
   const panelOpenRef = useRef(panelOpen);
   const snapshotRequestRef = useRef(0);
   const snapshotLoadingRequestRef = useRef(0);
@@ -1324,6 +1342,13 @@ export function AiChat({
     }
   }, [panelOpen]);
 
+  // W12-B: re-apply the resize bounds when 文字大小 changes while the panel is open.
+  const textScale = useRootTextScale();
+  useEffect(() => {
+    if (!panelOpenRef.current || window.innerWidth <= 719) return;
+    setPanelGeometry(loadPanelGeometry());
+  }, [textScale]);
+
   useEffect(() => {
     if (panelOpen && selectedThreadId) editorRef.current?.focus();
   }, [panelOpen, selectedThreadId, openThreadRequestId]);
@@ -1350,13 +1375,7 @@ export function AiChat({
       if (!session || session.pointerId !== event.pointerId) return;
       event.preventDefault();
 
-      const maxWidth = Math.min(
-        PANEL_MAX_WIDTH,
-        window.innerWidth - PANEL_EDGE_GAP * 2,
-      );
-      const minWidth = Math.min(PANEL_MIN_WIDTH, maxWidth);
-      const maxHeight = window.innerHeight - PANEL_EDGE_GAP * 2;
-      const minHeight = Math.min(PANEL_MIN_HEIGHT, maxHeight);
+      const { maxWidth, minWidth, maxHeight, minHeight } = panelBounds();
       const resizeWidth = session.edge === "left" || session.edge === "top-left";
       const resizeHeight = session.edge === "top" || session.edge === "top-left";
       const width = resizeWidth
@@ -1822,6 +1841,7 @@ export function AiChat({
     setAttachmentDragActive(false);
     setRequestedComposerText(null);
     taskComposerDraftOriginRef.current = null;
+    composerIntentRef.current = null;
   }
 
   useEffect(() => {
@@ -1853,6 +1873,7 @@ export function AiChat({
       setRequestedComposerText("composerText" in openThreadRequest
         ? openThreadRequest.composerText
         : null);
+      composerIntentRef.current = openThreadRequest.intent ?? null;
       setPanelOpen(true);
       onOpenThreadRequestHandled(openThreadRequest.requestId);
       return;
@@ -2012,6 +2033,7 @@ export function AiChat({
     if (!window.confirm(text(
       `删除本地对话“${thread.title}”？`,
       `Delete local chat “${thread.title}”?`,
+      `刪除本機對話「${thread.title}」？`,
     ))) return;
     setDeletingThreadId(thread.id);
     try {
@@ -2210,7 +2232,7 @@ export function AiChat({
       tokenElement.title = reference.label;
       content.append(tokenElement, editor.ownerDocument.createTextNode("\u200B"));
       newTokens.push({
-        key: crypto.randomUUID(),
+        key: newClientId(),
         candidateRef: reference.stableId,
         label: reference.label,
         kind: reference.kind,
@@ -2278,7 +2300,7 @@ export function AiChat({
     editor.ownerDocument.getSelection()?.removeAllRanges();
     editor.ownerDocument.getSelection()?.addRange(range);
     setComposerSkillTokens((current) => [...current, {
-      key: crypto.randomUUID(),
+      key: newClientId(),
       candidateRef: candidate.candidateRef,
       label: candidate.label,
       kind: candidate.kind,
@@ -2471,6 +2493,7 @@ export function AiChat({
             currentComposerRevision,
             dangerConfirmed,
             messageAttachments,
+            composerIntentRef.current ?? undefined,
           )
         : null;
       const run = composerTurnInput
@@ -2532,6 +2555,7 @@ export function AiChat({
               reject(new Error(text(
                 `无法读取附件 ${file.name}`,
                 `Could not read attachment ${file.name}.`,
+                `無法讀取附件 ${file.name}`,
               )));
               return;
             }
@@ -2547,6 +2571,7 @@ export function AiChat({
           reader.onerror = () => reject(new Error(text(
             `无法读取附件 ${file.name}`,
             `Could not read attachment ${file.name}.`,
+            `無法讀取附件 ${file.name}`,
           )));
           reader.readAsDataURL(file);
         })
@@ -2854,7 +2879,7 @@ export function AiChat({
                   <button
                     className="ai-chat-history-delete"
                     type="button"
-                    aria-label={text(`删除对话 ${thread.title}`, `Delete chat ${thread.title}`)}
+                    aria-label={text(`删除对话 ${thread.title}`, `Delete chat ${thread.title}`, `刪除對話 ${thread.title}`)}
                     title={text("删除本地记录", "Delete local record")}
                     disabled={thread.status === "running" || deletingThreadId === thread.id}
                     onClick={() => void deleteThread(thread)}

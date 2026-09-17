@@ -283,7 +283,7 @@ function unauthorized() {
   return json(
     401,
     { error: { code: "UNAUTHORIZED", message: "Valid Basic credentials are required" } },
-    { "www-authenticate": 'Basic realm="Codex Taskboard", charset="UTF-8"' },
+    { "www-authenticate": 'Basic realm="AutoMate Taskboard", charset="UTF-8"' },
   );
 }
 
@@ -341,6 +341,10 @@ async function authenticate(request, env) {
 
 function resolveAssignee(target, actor) {
   if (target === undefined || target === "current-user") return actor;
+  if (target === "claude-agent") {
+    // v2 Claude runs are local-only; cloud has no Claude agent identity.
+    throw new ApiError(400, "INVALID_FIELD", "'claude-agent' assignee is not available in cloud mode");
+  }
   const userId = `basic:${encodeURIComponent(actor.username.toLowerCase())}`;
   return {
     type: "agent",

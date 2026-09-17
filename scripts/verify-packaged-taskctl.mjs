@@ -36,12 +36,12 @@ function runTaskctl(wrapperPath, homeDirectory, args) {
   return JSON.parse(result.stdout);
 }
 
-const temporaryHome = await mkdtemp(path.join(os.tmpdir(), "codex-taskboard-taskctl."));
+const temporaryHome = await mkdtemp(path.join(os.tmpdir(), "automate-taskboard-taskctl."));
 const dataDirectory = path.join(
   temporaryHome,
   "Library",
   "Application Support",
-  "Codex Taskboard",
+  "AutoMate Taskboard",
 );
 await mkdir(dataDirectory, { recursive: true });
 const runtimeFile = path.join(dataDirectory, "launcher-runtime.json");
@@ -88,7 +88,7 @@ try {
     server.stdout.setEncoding("utf8");
     server.stdout.on("data", (chunk) => {
       stdout += chunk;
-      if (stdout.includes("Codex Taskboard listening")) {
+      if (stdout.includes("AutoMate Taskboard listening")) {
         clearTimeout(timeout);
         resolve();
       }

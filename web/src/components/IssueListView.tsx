@@ -1,9 +1,17 @@
 import { useState, type KeyboardEvent, type MouseEvent, type RefObject } from "react";
-import { assigneeTargetForActor } from "../actors";
+import { CLAUDE_AGENT_ACTOR, CODEX_AGENT_ACTOR, assigneeTargetForActor } from "../actors";
 import { taskPriorityLabel, taskStatusLabel, useTaskboardI18n } from "../i18n";
 import { labelPresentation } from "../labels";
 import type { TaskCardPresentation } from "../taskConversations";
-import { TASK_PRIORITIES, TASK_STATUSES, type ActorIdentity, type Task, type TaskDraft, type TaskStatus } from "../types";
+import {
+  TASK_PRIORITIES,
+  TASK_STATUSES,
+  type ActorIdentity,
+  type AssigneeTarget,
+  type Task,
+  type TaskDraft,
+  type TaskStatus,
+} from "../types";
 import { ActorAvatar } from "./ActorAvatar";
 import { LinearIcon } from "./LinearIcon";
 import { DueDateIcon, PriorityIcon, StatusIcon } from "./SemanticIcons";
@@ -108,7 +116,7 @@ export function IssueListView({
                               open={priorityMenuTaskId === task.id}
                               className="issue-list-property-picker"
                               triggerClassName={`issue-list-priority priority-${task.priority}`}
-                              ariaLabel={text(`${displayIdentifier} 优先级`, `${displayIdentifier} priority`)}
+                              ariaLabel={text(`${displayIdentifier} 优先级`, `${displayIdentifier} priority`, `${displayIdentifier} 優先順序`)}
                               onOpenChange={(open) => setPriorityMenuTaskId(open ? task.id : null)}
                               onChange={(priority) => void onUpdate(task, { priority }).catch(() => {})}
                             />
@@ -147,13 +155,14 @@ export function IssueListView({
                           <label className="issue-list-assignee" title={task.assignee.name} onClick={stopRow}>
                             <ActorAvatar actor={task.assignee} />
                             <select
-                              aria-label={text(`${displayIdentifier} 负责人`, `${displayIdentifier} assignee`)}
+                              aria-label={text(`${displayIdentifier} 负责人`, `${displayIdentifier} assignee`, `${displayIdentifier} 負責人`)}
                               value={assigneeTarget}
                               disabled={task.source === "jira"}
-                              onChange={(event) => void onUpdate(task, { assigneeTarget: event.target.value as "current-user" | "codex-agent" }).catch(() => {})}
+                              onChange={(event) => void onUpdate(task, { assigneeTarget: event.target.value as AssigneeTarget }).catch(() => {})}
                             >
                               <option value="current-user">{currentUser.name}</option>
-                              <option value="codex-agent">Codex Agent</option>
+                              <option value="codex-agent">{CODEX_AGENT_ACTOR.name}</option>
+                              <option value="claude-agent">{CLAUDE_AGENT_ACTOR.name}</option>
                             </select>
                           </label>
                         </span>
@@ -162,6 +171,7 @@ export function IssueListView({
                           title={text(
                             `创建于 ${new Date(task.createdAt).toLocaleString(locale)}`,
                             `Created ${new Date(task.createdAt).toLocaleString(locale)}`,
+                            `建立於 ${new Date(task.createdAt).toLocaleString(locale)}`,
                           )}
                         >
                           {createdDate(task.createdAt, locale)}
@@ -172,7 +182,7 @@ export function IssueListView({
                     <div className="issue-list-empty">
                       {hasActiveFilters
                         ? text("当前筛选下没有匹配议题", "No issues match the current filters")
-                        : text(`没有${statusLabel}议题`, `No ${statusLabel.toLowerCase()} issues`)}
+                        : text(`没有${statusLabel}议题`, `No ${statusLabel.toLowerCase()} issues`, `沒有${statusLabel}任務`)}
                     </div>
                   )}
                 </div>

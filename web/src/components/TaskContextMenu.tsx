@@ -102,6 +102,10 @@ function MenuItem({
   );
 }
 
+function rootFontPx(): number {
+  return Number.parseFloat(window.getComputedStyle(document.documentElement).fontSize) || 16;
+}
+
 export function TaskContextMenu({
   task,
   position,
@@ -160,7 +164,9 @@ export function TaskContextMenu({
     const x = Math.max(8, Math.min(position.x, window.innerWidth - rect.width - 8));
     const y = Math.max(8, Math.min(position.y, window.innerHeight - rect.height - 8));
     setPlacedPosition((current) => current.x === x && current.y === y ? current : { x, y });
-    setSubmenuSide(x + rect.width + 196 > window.innerWidth - 8 ? "left" : "right");
+    // First guess before a submenu exists: its min width (10.9375rem) + padding + gap, in the current root size.
+    // The real side is decided below from the opened panel's measured width (W12-B: text size scales menus).
+    setSubmenuSide(x + rect.width + (12.25 * rootFontPx()) > window.innerWidth - 8 ? "left" : "right");
   }, [position.x, position.y]);
 
   useLayoutEffect(() => {
@@ -171,6 +177,12 @@ export function TaskContextMenu({
     const panel = menuRef.current?.querySelector<HTMLElement>(`[data-submenu-panel="${submenu}"]`);
     if (!panel) return;
     const rect = panel.getBoundingClientRect();
+    const menuRect = menuRef.current!.getBoundingClientRect();
+    const gap = 0.25 * rootFontPx();
+    const rightSpace = window.innerWidth - 8 - (menuRect.right + gap);
+    const leftSpace = menuRect.left - gap - 8;
+    const side = rightSpace >= rect.width ? "right" : leftSpace >= rect.width ? "left" : rightSpace >= leftSpace ? "right" : "left";
+    setSubmenuSide((current) => current === side ? current : side);
     const shift = rect.bottom > window.innerHeight - 8
       ? window.innerHeight - 8 - rect.bottom
       : rect.top < 8
@@ -394,7 +406,7 @@ export function TaskContextMenu({
                 label={text("复制议题 ID", "Copy issue ID")}
                 onClick={() => closeThen(() => onCopy(
                   displayIdentifier,
-                  text(`${displayIdentifier} 已复制。`, `${displayIdentifier} copied.`),
+                  text(`${displayIdentifier} 已复制。`, `${displayIdentifier} copied.`, `${displayIdentifier} 已複製。`),
                 ))}
               />
               <MenuItem

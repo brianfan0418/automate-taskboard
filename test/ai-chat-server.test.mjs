@@ -6,6 +6,7 @@ import path from "node:path";
 import { test } from "node:test";
 
 import { createTaskboardServer } from "../server/index.mjs";
+import { NO_PRIVATE_LAN_SKIP_REASON, privateLanIpv4Address } from "./helpers/lan-address.mjs";
 
 async function createServerFixture(host = "127.0.0.1") {
   const directory = await mkdtemp(path.join(os.tmpdir(), "taskboard-ai-server-"));
@@ -44,7 +45,7 @@ if (args[0] === "debug") {
     dataDirectory: directory,
     codexExecutable,
     codexStatePath,
-    skillPath: "/fixture/manage-taskboard/SKILL.md",
+    skillPath: "/fixture/manage-automate-taskboard/SKILL.md",
   });
   const address = await app.listen({ host, port: 0 });
   return {
@@ -57,19 +58,6 @@ if (args[0] === "debug") {
       await rm(directory, { recursive: true, force: true });
     },
   };
-}
-
-function privateLanAddress() {
-  return Object.values(os.networkInterfaces())
-    .flat()
-    .find((entry) => {
-      if (entry?.family !== "IPv4" || entry.internal) return false;
-      const [first, second] = entry.address.split(".").map(Number);
-      return first === 10
-        || (first === 172 && second >= 16 && second <= 31)
-        || (first === 192 && second === 168)
-        || (first === 169 && second === 254);
-    })?.address;
 }
 
 async function requestFrom(address, port, pathname) {
@@ -162,15 +150,19 @@ test("loopback AI API freezes server-owned origin and rejects injected execution
 test("non-local AI threads reject projects without an available workspace", async () => {
   const fixture = await createServerFixture();
   try {
+    // W15: a folder must exist when the project is created; it goes missing afterwards.
+    const workspacePath = path.join(fixture.directory, "missing-workspace");
+    await mkdir(workspacePath, { recursive: true });
     const project = await request(fixture.baseUrl, "/api/projects", {
       method: "POST",
       body: {
         id: "missing-workspace",
         name: "Missing workspace",
-        workspacePath: path.join(fixture.directory, "missing-workspace"),
+        workspacePath,
       },
     });
     assert.equal(project.response.status, 201);
+    await rm(workspacePath, { recursive: true, force: true });
 
     const created = await request(fixture.baseUrl, "/api/local/ai/threads", {
       method: "POST",
@@ -321,9 +313,9 @@ test("thread management, interrupt and query contracts stay narrow", async () =>
 });
 
 test("local AI routes reject private-LAN clients while ordinary API routes remain available", async (context) => {
-  const address = privateLanAddress();
+  const address = privateLanIpv4Address();
   if (!address) {
-    context.skip("No private LAN interface is available");
+    context.skip(NO_PRIVATE_LAN_SKIP_REASON);
     return;
   }
   const fixture = await createServerFixture("0.0.0.0");

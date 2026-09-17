@@ -103,7 +103,7 @@ test("turn input cannot contain cwd, hidden context, model overrides or arbitrar
     skillIds: ["cloudflare"],
   });
   assert.equal(JSON.stringify(input).includes("workspacePath"), false);
-  assert.equal(JSON.stringify(input).includes("manage-taskboard"), false);
+  assert.equal(JSON.stringify(input).includes("manage-automate-taskboard"), false);
   assert.equal(JSON.stringify(input).includes("model"), false);
   assert.deepEqual(buildTurnInput("执行", [], true), {
     message: "执行",

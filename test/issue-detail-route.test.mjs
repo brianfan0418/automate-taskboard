@@ -11,7 +11,7 @@ const appSource = await readFile(new URL("../web/src/App.tsx", import.meta.url),
 
 test("issue detail URLs preserve project context and unrelated query parameters", () => {
   const url = buildIssueUrl(
-    "http://127.0.0.1:47823/?host=codex&project=other&status=todo",
+    "http://127.0.0.1:47833/?host=codex&project=other&status=todo",
     "local",
     "LOCAL-72",
   );
@@ -25,7 +25,7 @@ test("issue detail URLs preserve project context and unrelated query parameters"
 
 test("closing issue detail removes only the issue route", () => {
   const url = buildIssueUrl(
-    "http://127.0.0.1:47823/?host=codex&project=local&issue=LOCAL-72&label=缺陷",
+    "http://127.0.0.1:47833/?host=codex&project=local&issue=LOCAL-72&label=缺陷",
     "local",
     null,
   );

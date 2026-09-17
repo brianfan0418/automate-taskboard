@@ -44,6 +44,25 @@ function agentDispatchText(agent) {
   ].join("\n");
 }
 
+export const TASKBOARD_SKILL_ID = "manage-automate-taskboard";
+
+/**
+ * Import fix F2: user input items that select this board's own skill for an import turn. The
+ * skill item is sent only when the skill file is local to this device.
+ */
+export function taskboardImportInput(skillPath) {
+  return [
+    { type: "text", text: `$${TASKBOARD_SKILL_ID} ` },
+    ...(typeof skillPath === "string" && skillPath
+      ? [{ type: "skill", name: TASKBOARD_SKILL_ID, path: skillPath }]
+      : []),
+    {
+      type: "text",
+      text: `Use the ${TASKBOARD_SKILL_ID} skill (not any other taskboard skill) and follow its "Import existing project task status" section: create issues with \`taskctl issue create --import\`.\n\n`,
+    },
+  ];
+}
+
 function signalProcessGroup(child, signal) {
   signalProcessTree(child, signal);
 }
@@ -148,6 +167,9 @@ export class AiChatService {
     this.appServer = options.appServer ?? new CodexAppServer({
       executable: this.codexExecutable,
       processEnv: this.processEnv,
+      // Import fix F3: CODEX_TASKBOARD_URL (with the instance token prefix) so taskctl run from an
+      // AI chat turn targets this board, the same as board runs.
+      extraEnv: options.appServerExtraEnv ?? null,
     });
     this.composerCatalog = options.composerCatalog ?? new ComposerCatalog({
       appServer: this.appServer,
@@ -495,7 +517,8 @@ export class AiChatService {
     const skillIds = input.skillIds ?? [];
     const availableSkills = new Map(
       catalog.skills
-        .filter((skill) => skill.id !== "manage-taskboard")
+        // Hide this board's own skill and the side-by-side Dashi "Codex Taskboard" board skill.
+        .filter((skill) => skill.id !== "manage-automate-taskboard" && skill.id !== "manage-taskboard")
         .map((skill) => [skill.id, skill]),
     );
     for (const skillId of skillIds) {
@@ -978,6 +1001,11 @@ export class AiChatService {
         }
         return { type: "text", text: agentDispatchText(reference) };
       });
+      if (input.intent === "taskboard-import") {
+        userInput.unshift(...taskboardImportInput(
+          resolved.codexProjectKind === "remote" ? null : this.manageTaskboardSkillPath,
+        ));
+      }
       for (const [index, attachment] of attachments.entries()) {
         if (resolved.codexProjectKind === "remote") {
           userInput.push(this.#remoteAttachmentInput(attachment));
@@ -1010,6 +1038,7 @@ export class AiChatService {
           contractVersion: "composer.v1",
           revision: input.revision,
           document: input.document,
+          ...(input.intent ? { intent: input.intent } : {}),
           ...(agentDispatches.length > 0
             ? {
                 dispatchProtocol: AGENT_DISPATCH_PROTOCOL,
@@ -1136,7 +1165,7 @@ export class AiChatService {
       return { temporaryDirectory: null, attachmentPaths: [], imagePaths: [] };
     }
     const temporaryDirectory = await mkdtemp(
-      path.join(os.tmpdir(), "codex-taskboard-ai-turn-"),
+      path.join(os.tmpdir(), "automate-taskboard-ai-turn-"),
     );
     try {
       const attachmentPaths = [];

@@ -13,7 +13,14 @@ import {
 } from "../types";
 import { labelPresentation } from "../labels";
 import { taskPriorityLabel, useTaskboardI18n } from "../i18n";
-import { CODEX_AGENT_ACTOR, actorKey, assigneeTargetForActor } from "../actors";
+import {
+  CLAUDE_AGENT_ACTOR,
+  CODEX_AGENT_ACTOR,
+  actorKey,
+  assigneeTargetForActor,
+  providerDisplayName,
+  providerForAssignee,
+} from "../actors";
 import type {
   TaskCardPresentation,
   TaskConversationItem,
@@ -24,6 +31,15 @@ import { DueDateIcon, PriorityIcon, ProjectIcon } from "./SemanticIcons";
 import { LabelPicker } from "./LabelPicker";
 import { TaskPropertyPicker } from "./TaskPropertyPicker";
 import { TaskConversationMenu } from "./TaskConversationMenu";
+import {
+  TaskRunCopyConversationIdButton,
+  isActiveTaskRun,
+  isWaitingForPermissionError,
+  taskRunConversationId,
+  taskRunErrorText,
+  taskRunHasAppLink,
+} from "./TaskRunPanel";
+import "./TaskRunControls.css";
 import completeIcon from "../assets/figma-taskboard/card-complete.svg";
 import processingAnimation from "../assets/figma-taskboard/loading-16.svg";
 
@@ -49,7 +65,13 @@ interface TaskCardProps {
   onDragStart: (task: Task, height: number) => void;
   onDragEnd: () => void;
   onOpenConversation: (conversation: TaskConversationItem) => void;
+  // v2 run controls; optional so existing mounts keep compiling.
+  onStartRun?: (task: Task) => void | Promise<void>;
+  onStopRun?: (task: Task) => void | Promise<void>;
+  onOpenRunInApp?: (task: Task) => void | Promise<void>;
 }
+
+type RunCardAction = "start" | "stop" | "open";
 
 interface TaskCardMarkdownNode {
   type: string;
@@ -87,10 +109,10 @@ function calendarDate(value: string, locale: string) {
     .format(new Date(`${value}T12:00:00`));
 }
 
-function createdDate(value: string, locale: string, text: (chinese: string, english: string) => string) {
+function createdDate(value: string, locale: string, text: (chinese: string, english: string, taiwanese?: string) => string) {
   const formatted = new Intl.DateTimeFormat(locale, { month: "numeric", day: "numeric" })
     .format(new Date(value));
-  return text(`${formatted}创建`, `Created ${formatted}`);
+  return text(`${formatted}创建`, `Created ${formatted}`, `${formatted}建立`);
 }
 
 function elapsedTime(startedAt: string | null, now: number) {
@@ -177,7 +199,7 @@ function ProcessingProgress({
 
   const total = processing.total!;
   const completed = Math.max(0, Math.min(processing.completed!, total));
-  const label = text(`处理进度 ${completed}/${total}`, `Processing progress ${completed}/${total}`);
+  const label = text(`处理进度 ${completed}/${total}`, `Processing progress ${completed}/${total}`, `處理進度 ${completed}/${total}`);
 
   return (
     <div className="card-progress-row">
@@ -208,7 +230,7 @@ function ProcessingLabel({ processing }: { processing: TaskCardPresentation["pro
   return (
     <span className="task-processing-label">
       {running
-        ? (elapsed ? text(`已处理 ${elapsed}...`, `Processing for ${elapsed}...`) : text("正在处理...", "Processing..."))
+        ? (elapsed ? text(`已处理 ${elapsed}...`, `Processing for ${elapsed}...`, `已處理 ${elapsed}...`) : text("正在处理...", "Processing..."))
         : text("暂停处理", "Processing paused")}
     </span>
   );
@@ -246,6 +268,7 @@ function ParticipantAvatars({ participants }: { participants: ActorIdentity[] })
       aria-label={text(
         `参与人：${participants.map((participant) => participant.name).join("、")}`,
         `Participants: ${participants.map((participant) => participant.name).join(", ")}`,
+        `參與者：${participants.map((participant) => participant.name).join("、")}`,
       )}
     >
       {participants.map((participant) => (
@@ -309,10 +332,11 @@ function PriorityControl({
       disabled={disabled}
       className="card-property-control"
       triggerClassName={`priority-chip priority-chip-${task.priority}`}
-      ariaLabel={text(`${displayIdentifier} 优先级`, `${displayIdentifier} priority`)}
+      ariaLabel={text(`${displayIdentifier} 优先级`, `${displayIdentifier} priority`, `${displayIdentifier} 優先順序`)}
       title={text(
         `优先级：${taskPriorityLabel(language, task.priority)}`,
         `Priority: ${taskPriorityLabel(language, task.priority)}`,
+        `優先順序：${taskPriorityLabel(language, task.priority)}`,
       )}
       onOpenChange={onOpenChange}
       onChange={onChange}
@@ -370,7 +394,7 @@ function AssigneeControl({
   const participants = persistedParticipants.map((participant) => (
     actorKey(participant) === currentUserKey ? currentUser : participant
   ));
-  const options = [assignee, currentUser, CODEX_AGENT_ACTOR]
+  const options = [assignee, currentUser, CODEX_AGENT_ACTOR, CLAUDE_AGENT_ACTOR]
     .filter((actor, index, actors) => (
       actors.findIndex((candidate) => actorKey(candidate) === actorKey(actor)) === index
     ));
@@ -387,8 +411,8 @@ function AssigneeControl({
       className="task-participants-control card-property-control"
       triggerClassName="task-assignee-trigger"
       triggerContent={<ParticipantAvatars participants={participants} />}
-      ariaLabel={text(`${displayIdentifier} 负责人`, `${displayIdentifier} assignee`)}
-      title={text(`负责人：${assignee.name}`, `Assignee: ${assignee.name}`)}
+      ariaLabel={text(`${displayIdentifier} 负责人`, `${displayIdentifier} assignee`, `${displayIdentifier} 負責人`)}
+      title={text(`负责人：${assignee.name}`, `Assignee: ${assignee.name}`, `負責人：${assignee.name}`)}
       onOpenChange={onOpenChange}
       onChange={(value) => {
         const selected = options.find((actor) => actorKey(actor) === value);
@@ -396,6 +420,138 @@ function AssigneeControl({
         if (target) onChange(target);
       }}
     />
+  );
+}
+
+function RunElapsed({ startedAt }: { startedAt: string | null }) {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    if (!startedAt) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [startedAt]);
+  const elapsed = elapsedTime(startedAt, now);
+  return elapsed ? <span className="task-run-chip-elapsed">{elapsed}</span> : null;
+}
+
+function TaskRunCardRow({
+  task,
+  conversations,
+  onStartRun,
+  onStopRun,
+  onOpenRunInApp,
+  onOpenConversation,
+}: {
+  task: Task;
+  conversations: TaskConversationItem[];
+  onStartRun?: (task: Task) => void | Promise<void>;
+  onStopRun?: (task: Task) => void | Promise<void>;
+  onOpenRunInApp?: (task: Task) => void | Promise<void>;
+  onOpenConversation: (conversation: TaskConversationItem) => void;
+}) {
+  const { text } = useTaskboardI18n();
+  const [pendingAction, setPendingAction] = useState<RunCardAction | null>(null);
+  const displayIdentifier = task.externalKey ?? task.identifier;
+  const activeRun = isActiveTaskRun(task.activeRun) ? task.activeRun : null;
+  const appLinkRun = activeRun ?? task.latestRun ?? null;
+  const canOpenInApp = Boolean(onOpenRunInApp) && taskRunHasAppLink(appLinkRun);
+  const canStart = Boolean(onStartRun)
+    && !activeRun
+    && task.status === "todo"
+    && providerForAssignee(task.assignee) !== null;
+  const canStop = Boolean(onStopRun) && activeRun !== null && activeRun.status !== "stopping";
+  // Amendment 3: while a Codex run is active the App link is not offered; the thread id can still be copied.
+  const canCopyConversationId = activeRun !== null && !canOpenInApp && taskRunConversationId(activeRun) !== null;
+  const waitingNotice = activeRun && isWaitingForPermissionError(activeRun.error)
+    ? taskRunErrorText(activeRun.error, text)
+    : null;
+  if (!activeRun && !canOpenInApp && !canStart) return null;
+
+  function runAction(action: RunCardAction, callback: ((task: Task) => void | Promise<void>) | undefined) {
+    if (!callback || pendingAction) return;
+    // Call synchronously so the click's user activation still applies (e.g. opening an app URL).
+    let result: void | Promise<void>;
+    try {
+      result = callback(task);
+    } catch {
+      return;
+    }
+    if (!result) return;
+    setPendingAction(action);
+    void result
+      .catch(() => {})
+      .finally(() => setPendingAction((current) => current === action ? null : current));
+  }
+
+  const providerName = activeRun ? providerDisplayName(activeRun.provider) : "";
+  return (
+    <div className={`task-run-card-row${activeRun ? ` is-${activeRun.status}` : ""}${waitingNotice ? " has-notice" : ""}`}>
+      {activeRun && activeRun.status !== "stopping" && (
+        <img className="task-processing-glyph" src={processingAnimation} alt="" aria-hidden="true" />
+      )}
+      {activeRun && (
+        <span className={`task-run-chip is-${activeRun.status}`}>
+          {activeRun.status === "stopping"
+            ? text(`停止中 · ${providerName}`, `Stopping · ${providerName}`)
+            : text(`處理中 · ${providerName}`, `In progress · ${providerName}`)}
+          {activeRun.status !== "stopping" && <RunElapsed startedAt={activeRun.startedAt} />}
+        </span>
+      )}
+      <span className="task-run-card-spacer" aria-hidden="true" />
+      {canCopyConversationId && <TaskRunCopyConversationIdButton run={activeRun} />}
+      {canOpenInApp && (
+        <button
+          className="task-run-card-button"
+          type="button"
+          disabled={pendingAction !== null}
+          aria-label={text(`在 App 開啟 ${displayIdentifier}`, `Open ${displayIdentifier} in app`)}
+          onClick={(event) => {
+            event.stopPropagation();
+            runAction("open", onOpenRunInApp);
+          }}
+        >
+          {text("在 App 開啟", "Open in app")}
+        </button>
+      )}
+      {canStop && (
+        <button
+          className="task-run-card-button is-danger"
+          type="button"
+          disabled={pendingAction !== null}
+          aria-label={text(`停止 ${displayIdentifier}`, `Stop ${displayIdentifier}`)}
+          onClick={(event) => {
+            event.stopPropagation();
+            runAction("stop", onStopRun);
+          }}
+        >
+          {pendingAction === "stop" ? text("停止中…", "Stopping…") : text("停止", "Stop")}
+        </button>
+      )}
+      {canStart && (
+        <button
+          className="task-run-card-button is-primary"
+          type="button"
+          disabled={pendingAction !== null}
+          aria-label={text(`開工 ${displayIdentifier}`, `Start ${displayIdentifier}`)}
+          onClick={(event) => {
+            event.stopPropagation();
+            runAction("start", onStartRun);
+          }}
+        >
+          {pendingAction === "start" ? text("開工中…", "Starting…") : text("開工", "Start")}
+        </button>
+      )}
+      {waitingNotice && (
+        <p className="task-run-card-notice" role="status">{waitingNotice}</p>
+      )}
+      {activeRun && conversations.length > 0 && (
+        <TaskConversationMenu
+          conversations={conversations}
+          onOpenConversation={onOpenConversation}
+        />
+      )}
+    </div>
   );
 }
 
@@ -421,6 +577,9 @@ export function TaskCard({
   onDragStart,
   onDragEnd,
   onOpenConversation,
+  onStartRun,
+  onStopRun,
+  onOpenRunInApp,
 }: TaskCardProps) {
   const { locale, text } = useTaskboardI18n();
   const displayIdentifier = task.externalKey ?? task.identifier;
@@ -433,6 +592,7 @@ export function TaskCard({
     avatarUrl: task.creatorAvatarUrl,
   };
   const processingCard = task.status === "in_progress";
+  const hasActiveRun = isActiveTaskRun(task.activeRun);
   const supportsConversation = task.status === "in_progress"
     || task.status === "in_review"
     || task.status === "blocked"
@@ -485,7 +645,7 @@ export function TaskCard({
       <button
         className="task-card-open"
         type="button"
-        aria-label={text(`打开 ${displayIdentifier}: ${task.title}`, `Open ${displayIdentifier}: ${task.title}`)}
+        aria-label={text(`打开 ${displayIdentifier}: ${task.title}`, `Open ${displayIdentifier}: ${task.title}`, `開啟 ${displayIdentifier}: ${task.title}`)}
         onClick={() => onEdit(task)}
       />
 
@@ -601,7 +761,7 @@ export function TaskCard({
         </div>
       )}
 
-      {processingCard && (
+      {processingCard && !hasActiveRun && (
         <>
           <ProcessingProgress presentation={presentation} />
           <ProcessingStatusRow
@@ -610,6 +770,15 @@ export function TaskCard({
           />
         </>
       )}
+
+      <TaskRunCardRow
+        task={task}
+        conversations={presentation.conversations}
+        onStartRun={onStartRun}
+        onStopRun={onStopRun}
+        onOpenRunInApp={onOpenRunInApp}
+        onOpenConversation={onOpenConversation}
+      />
     </article>
   );
 }

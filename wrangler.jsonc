@@ -15,7 +15,7 @@
     {
       "binding": "DB",
       "database_name": "codex-taskboard-db",
-      "database_id": "d711c6fb-2d82-4a50-baf1-289db5d54abf",
+      "database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID",
       "migrations_dir": "cloud/migrations"
     }
   ],

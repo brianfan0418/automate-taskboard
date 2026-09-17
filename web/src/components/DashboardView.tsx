@@ -317,6 +317,7 @@ function DashboardProgressChart({ progressData, todayValue }: {
           aria-label={text(
             `项目累计进度：范围 ${progressData.scope}，已开始 ${progressData.started}，已完成 ${progressData.completed}`,
             `Cumulative project progress: scope ${progressData.scope}, started ${progressData.started}, completed ${progressData.completed}`,
+            `專案累計進度：範圍 ${progressData.scope}，已開始 ${progressData.started}，已完成 ${progressData.completed}`,
           )}
         >
           <defs>
@@ -430,6 +431,7 @@ function DashboardProgressChart({ progressData, todayValue }: {
                 aria-label={text(
                   `${chartDate(point.timestamp, locale)}：范围 ${point.scope}，已开始 ${Math.max(0, point.started - point.completed)}，已完成 ${point.completed}`,
                   `${chartDate(point.timestamp, locale)}: scope ${point.scope}, started ${Math.max(0, point.started - point.completed)}, completed ${point.completed}`,
+                  `${chartDate(point.timestamp, locale)}：範圍 ${point.scope}，已開始 ${Math.max(0, point.started - point.completed)}，已完成 ${point.completed}`,
                 )}
                 onMouseEnter={() => setProgressHoverIndex(index)}
                 onMouseLeave={() => setProgressHoverIndex(null)}
@@ -578,7 +580,7 @@ export function DashboardView({
             count: labelCounts.slice(11).reduce((total, item) => total + item.count, 0),
             presentation: {
               ...labelPresentation("其他"),
-              name: text(`其他（${labelCounts.length - 11}个）`, `Other (${labelCounts.length - 11})`),
+              name: text(`其他（${labelCounts.length - 11}个）`, `Other (${labelCounts.length - 11})`, `其他（${labelCounts.length - 11}個）`),
             },
           },
         ]
@@ -687,6 +689,7 @@ export function DashboardView({
     ? text(
         `所有项目共有 ${tasks.length} 个议题，${completedTasks.length} 个已完成，${activeTasks.length} 个尚未结束；当前 ${tasks.filter((task) => task.status === "blocked").length} 个遇到阻碍，${overdueTasks.length} 个已逾期。`,
         `Across all projects, ${tasks.length} issues are tracked: ${completedTasks.length} completed and ${activeTasks.length} still open; ${tasks.filter((task) => task.status === "blocked").length} are blocked and ${overdueTasks.length} overdue.`,
+        `所有專案共有 ${tasks.length} 個任務，${completedTasks.length} 個已完成，${activeTasks.length} 個尚未結束；目前 ${tasks.filter((task) => task.status === "blocked").length} 個遇到阻礙，${overdueTasks.length} 個已逾期。`,
       )
     : projectSummary?.summary
       ?? (projectSummary?.refreshing
@@ -724,6 +727,7 @@ export function DashboardView({
               <span>{text(
                 `${completedTasks.length} 个已完成 · ${activeTasks.length} 个尚未结束`,
                 `${completedTasks.length} completed · ${activeTasks.length} remaining`,
+                `${completedTasks.length} 個已完成 · ${activeTasks.length} 個尚未結束`,
               )}</span>
             </div>
           </header>
@@ -859,6 +863,7 @@ export function DashboardView({
                         <small>{text(
                           `${item.count} 个已完成议题`,
                           `${item.count} completed ${item.count === 1 ? "issue" : "issues"}`,
+                          `${item.count} 個已完成任務`,
                         )}</small>
                       </span>
                       <span className={`dashboard-role-share tone-${index % 5}`}>
@@ -904,6 +909,7 @@ export function DashboardView({
                           title={day.future ? undefined : text(
                             `${contributionDateFormatter.format(day.date)} · ${day.count} 个议题更新`,
                             `${contributionDateFormatter.format(day.date)} · ${day.count} issue ${day.count === 1 ? "update" : "updates"}`,
+                            `${contributionDateFormatter.format(day.date)} · ${day.count} 個任務更新`,
                           )}
                           key={day.key}
                         />

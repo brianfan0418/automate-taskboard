@@ -233,7 +233,7 @@ export function buildCodexPrompt(thread, { message, skills, attachmentPaths }, s
   );
 
   return [
-    `[$manage-taskboard](${skillPath}) e-taskboard`,
+    `[$manage-automate-taskboard](${skillPath}) e-taskboard`,
     "",
     "<taskboard_context>",
     ...context,

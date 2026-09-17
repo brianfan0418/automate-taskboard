@@ -9,6 +9,7 @@ import type {
   ComposerDocument,
   ComposerNode,
   ComposerTurnInput,
+  ComposerTurnIntent,
 } from "./types";
 import { COMPOSER_CONTRACT_VERSION } from "./types.ts";
 
@@ -132,6 +133,7 @@ export function buildComposerTurnInput(
   revision: string,
   dangerFullAccessConfirmed: boolean,
   attachments: AiChatAttachmentInput[] = [],
+  intent?: ComposerTurnIntent,
 ): ComposerTurnInput {
   return {
     contractVersion: COMPOSER_CONTRACT_VERSION,
@@ -139,6 +141,7 @@ export function buildComposerTurnInput(
     document: serializeComposerDocument(document),
     ...(attachments.length > 0 ? { attachments } : {}),
     ...(dangerFullAccessConfirmed ? { dangerFullAccessConfirmed: true } : {}),
+    ...(intent ? { intent } : {}),
   };
 }
 

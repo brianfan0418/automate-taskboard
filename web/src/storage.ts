@@ -1,3 +1,5 @@
+import { MOBILE_CSRF_HEADER, readMobileCsrfToken } from "./api";
+
 const memoryStorage = new Map<string, string>();
 export const PROJECT_BOARD_DISPLAY_SETTINGS_KEY_PREFIX = "taskboard.project-board-display-settings.v3.";
 const RETRY_DELAY_MS = 250;
@@ -6,6 +8,13 @@ let localStorageBackend: Storage | null = null;
 let serverBacked = false;
 let storageWrite = Promise.resolve();
 let storageRefresh = Promise.resolve();
+
+// A paired phone's writes need the same x-relay-csrf header as api.ts request<T>() (T5); without it
+// the display-settings PATCH gets 401 and is dropped.
+export function mobileCsrfWriteHeaders(headers: Record<string, string>): Record<string, string> {
+  const token = readMobileCsrfToken();
+  return token ? { ...headers, [MOBILE_CSRF_HEADER]: token } : headers;
+}
 
 function isProjectBoardDisplaySettingsKey(key: string) {
   return key.startsWith(PROJECT_BOARD_DISPLAY_SETTINGS_KEY_PREFIX);
@@ -45,7 +54,7 @@ function persist(key: string, value: string | null) {
       try {
         const response = await fetch(new URL("api/client-storage", document.baseURI), {
           method: "PATCH",
-          headers: { "content-type": "application/json" },
+          headers: mobileCsrfWriteHeaders({ "content-type": "application/json" }),
           body,
           keepalive,
         });

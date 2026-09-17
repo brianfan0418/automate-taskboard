@@ -1,16 +1,17 @@
 {
-  "name": "codex-taskboard",
-  "version": "1.1.23",
+  "name": "automate-taskboard",
+  "version": "2.0.4",
   "private": true,
   "type": "module",
   "engines": {
     "node": ">=22.5"
   },
   "bin": {
-    "taskctl": "./cli/taskctl.mjs"
+    "taskctl": "./cli/taskctl.mjs",
+    "automate-taskctl": "./cli/taskctl.mjs"
   },
   "scripts": {
-    "codex": "node scripts/codex-injector.mjs --launch --watch --open --port 9231",
+    "codex": "node scripts/codex-injector.mjs --launch --watch --open --port 9241",
     "codex:inject": "node scripts/codex-injector.mjs --watch",
     "codex:daemon": "node scripts/codex-injector.mjs --daemon --open",
     "codex:refresh": "node scripts/codex-injector.mjs --refresh",
@@ -18,10 +19,12 @@
     "app:dev": "npm run app:prepare && tauri dev",
     "app:build": "npm run app:prepare -- --target universal-apple-darwin && CI=true node scripts/tauri-build.mjs --target universal-apple-darwin --bundles app,dmg --config '{\"bundle\":{\"createUpdaterArtifacts\":false}}'",
     "app:build:linux:x64": "npm run app:prepare -- --target x86_64-unknown-linux-gnu && node scripts/tauri-build.mjs --target x86_64-unknown-linux-gnu --bundles deb,appimage --ci --config src-tauri/tauri.linux.conf.json",
-    "app:build:windows": "npm run app:prepare -- --target x86_64-pc-windows-msvc && node scripts/tauri-build.mjs --target x86_64-pc-windows-msvc --bundles nsis --no-sign --ci --config src-tauri/tauri.windows.conf.json",
+    "app:build:windows": "npm run app:prepare -- --target x86_64-pc-windows-msvc && npm run build:conpty && node scripts/tauri-build.mjs --target x86_64-pc-windows-msvc --bundles nsis --no-sign --ci --config src-tauri/tauri.windows.conf.json",
     "app:preflight": "node scripts/preflight-macos-app.mjs",
     "app:verify-packaged-taskctl": "node scripts/verify-packaged-taskctl.mjs",
     "app:verify-release": "node scripts/verify-macos-release.mjs",
+    "release:publish": "node scripts/release-publish.mjs",
+    "update:keygen": "node scripts/update-keygen.mjs",
     "tauri": "tauri",
     "dev": "node scripts/dev.mjs",
     "dev:server": "node --watch server/index.mjs --dev",
@@ -29,11 +32,13 @@
     "dev:cloud": "npm run build:web && wrangler dev --local",
     "build": "vite build --config web/vite.config.ts && node scripts/codex-injector.mjs --refresh-if-running",
     "build:web": "vite build --config web/vite.config.ts",
+    "build:conpty": "node scripts/build-conpty-helper.mjs",
     "typecheck": "tsc -p web/tsconfig.json --noEmit",
     "start": "node server/index.mjs",
     "taskctl": "node cli/taskctl.mjs",
-    "test": "node --test && npm run test:components",
-    "test:components": "vitest run web/src/components/MarkdownDocument.test.tsx --environment jsdom",
+    "test": "npm run test:node && npm run test:components",
+    "test:node": "node --test \"test/**/*.test.mjs\"",
+    "test:components": "vitest run web/src/components/MarkdownDocument.test.tsx web/src/components/PhoneOnboarding.test.tsx web/src/mobileUiModel.test.ts web/src/i18n.test.ts web/src/v2WebIntegration.test.tsx web/src/textSize.test.tsx web/src/newTaskEntry.test.tsx --environment jsdom",
     "test:cloud": "node --test test/cloud-shared-worker.test.mjs",
     "cloud:migrate:local": "wrangler d1 migrations apply codex-taskboard-db --local",
     "cloud:migrate": "wrangler d1 migrations apply codex-taskboard-db --remote",

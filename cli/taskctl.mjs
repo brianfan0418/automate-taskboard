@@ -7,6 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
+import "../shared/automate-env-init.mjs";
 import { normalizeCloudUrl } from "../server/cloud-config.mjs";
 import {
   DEFAULT_PROJECT_ID,
@@ -16,7 +17,7 @@ import {
 } from "../shared/domain.mjs";
 
 export const SCHEMA_VERSION = 2;
-export const DEFAULT_API_URL = "http://127.0.0.1:47823";
+export const DEFAULT_API_URL = "http://127.0.0.1:47833";
 
 const execFileAsync = promisify(execFile);
 
@@ -26,7 +27,7 @@ const sourceRuntimeFile = path.resolve(
   ".data",
   "launcher-runtime.json",
 );
-const BOOLEAN_OPTIONS = new Set(["json", "clear-binding-thread", "help"]);
+const BOOLEAN_OPTIONS = new Set(["json", "clear-binding-thread", "help", "import"]);
 const GLOBAL_OPTIONS = new Set(["runtime-file"]);
 
 const COMMAND_OPTIONS = new Map([
@@ -42,6 +43,7 @@ const COMMAND_OPTIONS = new Map([
   [
     "issue create",
     new Set([
+      "import",
       "project",
       "title",
       "description",
@@ -161,7 +163,8 @@ Actions:
     [--thread-id ID]
     [--git-branch BRANCH | --worktree-path PATH [--worktree-branch BRANCH]]
     [--start-date YYYY-MM-DD] [--due-date YYYY-MM-DD]
-    [--recurrence-interval N --recurrence-unit day|week|month|year] [--json]
+    [--recurrence-interval N --recurrence-unit day|week|month|year]
+    [--import] [--json]
   update ISSUE_ID
     [--project PROJECT_ID] [--title TITLE]
     [--description TEXT | --description-file FILE]
@@ -185,6 +188,9 @@ Actions:
 
 Statuses: backlog, todo, in_progress, in_review, blocked, done, canceled
 Priorities: none, urgent, high, medium, low
+
+Import (--import, this device only): status done creates a done card; every other
+status creates a backlog card. Imported cards never start or queue AI work.
 
 Example:
   taskctl issue get LOCAL-275 --json`],
@@ -835,7 +841,7 @@ async function createIssue(api, options, overrides) {
   const developmentContext = developmentContextFromOptions(options, overrides);
   const recurrence = recurrenceFromOptions(options);
   const threadId = resolveThreadId(options, overrides);
-  return api.request("POST", "/api/tasks", {
+  return api.request("POST", options.import === true ? "/api/tasks/import" : "/api/tasks", {
     projectId: requiredOption(options, "project"),
     title: requiredOption(options, "title"),
     description: await resolveDescription(options, overrides),
@@ -1266,7 +1272,7 @@ async function resolveWslRuntimeFile(overrides) {
     const windowsAppData = await run(
       "cmd.exe",
       ["/d", "/u", "/s", "/c", "set APPDATA"],
-      { encoding: "buffer" },
+      { encoding: "buffer", windowsHide: true },
     );
     const appDataLine = windowsAppData.stdout
       .toString("utf16le")
@@ -1277,11 +1283,11 @@ async function resolveWslRuntimeFile(overrides) {
     const appData = await run(
       "wslpath",
       ["-u", windowsAppDataPath],
-      { encoding: "utf8" },
+      { encoding: "utf8", windowsHide: true },
     );
     const appDataPath = appData.stdout.trim();
     return appDataPath
-      ? path.join(appDataPath, "Codex Taskboard", "launcher-runtime.json")
+      ? path.join(appDataPath, "AutoMate Taskboard", "launcher-runtime.json")
       : undefined;
   } catch {
     return undefined;
@@ -1290,7 +1296,7 @@ async function resolveWslRuntimeFile(overrides) {
 
 async function fetchThroughWindows(url, init, overrides) {
   const run = overrides.spawn ?? spawn;
-  const marker = "__CODEX_TASKBOARD_CURL_RESPONSE__";
+  const marker = "__AUTOMATE_TASKBOARD_CURL_RESPONSE__";
   const args = [
     "--disable",
     "--noproxy",

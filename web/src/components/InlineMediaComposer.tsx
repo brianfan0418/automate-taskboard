@@ -90,7 +90,7 @@ function fileKey(file: File): string {
   return `${file.name}:${file.size}:${file.lastModified}`;
 }
 
-type InlineMediaError = string | readonly [string, string];
+type InlineMediaError = string | readonly [string, string, string?];
 
 export interface InlineMediaComposerHandle {
   focus: () => void;
@@ -196,7 +196,7 @@ function PersistedImageBlock({
       <button
         type="button"
         disabled={disabled}
-        aria-label={text(`移除 ${segment.alt || "图片"}`, `Remove ${segment.alt || "image"}`)}
+        aria-label={text(`移除 ${segment.alt || "图片"}`, `Remove ${segment.alt || "image"}`, `移除 ${segment.alt || "圖片"}`)}
         onClick={onRemove}
       >
         <LinearIcon name="close" />
@@ -347,10 +347,12 @@ function IssueReferenceChip({
         ? text(
             `${displayIdentifier} ${task.title}，按退格键或删除键移除`,
             `${displayIdentifier} ${task.title}, press Backspace or Delete to remove`,
+            `${displayIdentifier} ${task.title}，按退格鍵或刪除鍵移除`,
           )
         : text(
             `${displayIdentifier}，按退格键或删除键移除`,
             `${displayIdentifier}, press Backspace or Delete to remove`,
+            `${displayIdentifier}，按退格鍵或刪除鍵移除`,
           )}
       onKeyDown={(event) => {
         if (disabled) return;
@@ -400,6 +402,7 @@ function ComposerReferenceChip({
       aria-label={text(
         `${kind} ${segment.label}，按退格键或删除键移除`,
         `${kind} ${segment.label}, press Backspace or Delete to remove`,
+        `${kind} ${segment.label}，按退格鍵或刪除鍵移除`,
       )}
       onKeyDown={(event) => {
         if (event.defaultPrevented) return;
@@ -1397,6 +1400,7 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
         onErrorRef.current([
           `“${oversized.name}” 超过 25 MB，无法上传。`,
           `“${oversized.name}” is larger than 25 MB and cannot be uploaded.`,
+          `「${oversized.name}」超過 25 MB，無法上傳。`,
         ]);
         return;
       }

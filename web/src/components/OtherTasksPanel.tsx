@@ -11,12 +11,12 @@ import { TaskCard } from "./TaskCard";
 function archivedDate(
   value: string | null,
   locale: string,
-  text: (chinese: string, english: string) => string,
+  text: (chinese: string, english: string, taiwanese?: string) => string,
 ) {
   if (!value) return "";
   const formatted = new Intl.DateTimeFormat(locale, { month: "numeric", day: "numeric" })
     .format(new Date(value));
-  return text(`${formatted}归档`, `Archived ${formatted}`);
+  return text(`${formatted}归档`, `Archived ${formatted}`, `${formatted}封存`);
 }
 
 interface ArchivedTaskCardProps {
@@ -62,7 +62,7 @@ function ArchivedTaskCard({
             <button
               className="archived-task-action archived-task-delete"
               type="button"
-              aria-label={text(`永久删除 ${displayIdentifier}`, `Permanently delete ${displayIdentifier}`)}
+              aria-label={text(`永久删除 ${displayIdentifier}`, `Permanently delete ${displayIdentifier}`, `永久刪除 ${displayIdentifier}`)}
               title={text("永久删除", "Delete permanently")}
               disabled={busy}
               onClick={() => onDelete(task)}
@@ -163,6 +163,10 @@ interface OtherTasksPanelProps {
   onDragEnter: (status: TaskStatus) => void;
   onDrop: (status: TaskStatus, taskId: string, beforeTaskId: string | null) => void;
   onOpenConversation: (conversation: TaskConversationItem) => void;
+  // v2 run controls forwarded to TaskCard (optional).
+  onStartRun?: (task: Task) => void | Promise<void>;
+  onStopRun?: (task: Task) => void | Promise<void>;
+  onOpenRunInApp?: (task: Task) => void | Promise<void>;
 }
 
 export function OtherTasksPanel({
@@ -199,6 +203,9 @@ export function OtherTasksPanel({
   onDragEnter,
   onDrop,
   onOpenConversation,
+  onStartRun,
+  onStopRun,
+  onOpenRunInApp,
 }: OtherTasksPanelProps) {
   const { language, text } = useTaskboardI18n();
   const archived = activeTab === "archived";
@@ -251,7 +258,7 @@ export function OtherTasksPanel({
               onClick={() => onTabChange(tab)}
             >
               <span className="other-tasks-tab-label">{label}</span>
-              <span className="other-tasks-tab-count" aria-label={text(`${count} 个议题`, `${count} issues`)}>
+              <span className="other-tasks-tab-count" aria-label={text(`${count} 个议题`, `${count} issues`, `${count} 個任務`)}>
                 {count}
               </span>
             </button>
@@ -263,8 +270,8 @@ export function OtherTasksPanel({
         <button
           className="other-tasks-add"
           type="button"
-          aria-label={text(`在${activeLabel}中新建议题`, `Create issue in ${activeLabel}`)}
-          title={text(`添加到${activeLabel}`, `Add to ${activeLabel}`)}
+          aria-label={text(`在${activeLabel}中新建议题`, `Create issue in ${activeLabel}`, `在${activeLabel}中新增任務`)}
+          title={text(`添加到${activeLabel}`, `Add to ${activeLabel}`, `新增到${activeLabel}`)}
           onClick={() => onCreate(activeTab)}
         >
           <PlusIcon color="currentColor" size={11} />
@@ -321,6 +328,9 @@ export function OtherTasksPanel({
               onDragStart={onDragStart}
               onDragEnd={onDragEnd}
               onOpenConversation={onOpenConversation}
+              onStartRun={onStartRun}
+              onStopRun={onStopRun}
+              onOpenRunInApp={onOpenRunInApp}
             />
           );
         })}
@@ -339,7 +349,7 @@ export function OtherTasksPanel({
                 ? text("搜索和筛选会同步作用于所有状态。", "Search and filters apply to every status.")
                 : archived
                   ? text("没有已归档议题。", "There are no archived issues.")
-                  : text(`没有${activeLabel}。`, `There are no issues in ${activeLabel}.`)}
+                  : text(`没有${activeLabel}。`, `There are no issues in ${activeLabel}.`, `沒有${activeLabel}。`)}
             </span>
           </div>
         )}

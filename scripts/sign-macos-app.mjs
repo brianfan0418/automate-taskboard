@@ -18,7 +18,7 @@ if (!appPath) throw new Error("Usage: sign-macos-app.mjs <App.app>");
 if (!identity) throw new Error("APPLE_SIGNING_IDENTITY is required");
 
 const nodePath = path.join(appPath, "Contents", "MacOS", "node");
-const launcherPath = path.join(appPath, "Contents", "MacOS", "codex-taskboard-launcher");
+const launcherPath = path.join(appPath, "Contents", "MacOS", "automate-taskboard-launcher");
 const entitlementsPath = path.join(projectRoot, "src-tauri", "Entitlements.plist");
 
 function run(command, args, options = {}) {

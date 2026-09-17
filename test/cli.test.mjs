@@ -59,7 +59,7 @@ test("project list uses the default local service and adds schemaVersion", async
     projects: [{ id: "local", name: "Local" }],
     schemaVersion: 2,
   });
-  assert.equal(calls[0].url, "http://127.0.0.1:47823/api/projects");
+  assert.equal(calls[0].url, "http://127.0.0.1:47833/api/projects");
   assert.equal(calls[0].init.method, "GET");
   assert.equal(calls[0].init.headers["x-taskboard-client"], "taskctl");
 });
@@ -104,7 +104,7 @@ test("WSL taskctl discovers the Windows launcher runtime descriptor from Windows
   let requestedUrl;
   const runtimeFile = path.join(
     "/windows/users/R&D Müller/AppData/Roaming",
-    "Codex Taskboard",
+    "AutoMate Taskboard",
     "launcher-runtime.json",
   );
   const readPaths = [];
@@ -119,7 +119,7 @@ test("WSL taskctl discovers the Windows launcher runtime descriptor from Windows
       execFile: async (file, args, options) => {
         if (file === "cmd.exe") {
           assert.deepEqual(args, ["/d", "/u", "/s", "/c", "set APPDATA"]);
-          assert.deepEqual(options, { encoding: "buffer" });
+          assert.deepEqual(options, { encoding: "buffer", windowsHide: true });
           return {
             stdout: Buffer.from(
               "APPDATA=C:\\Users\\R&D Müller\\AppData\\Roaming\r\n",
@@ -130,7 +130,7 @@ test("WSL taskctl discovers the Windows launcher runtime descriptor from Windows
         }
         assert.equal(file, "wslpath");
         assert.deepEqual(args, ["-u", "C:\\Users\\R&D Müller\\AppData\\Roaming"]);
-        assert.deepEqual(options, { encoding: "utf8" });
+        assert.deepEqual(options, { encoding: "utf8", windowsHide: true });
         return { stdout: "/windows/users/R&D Müller/AppData/Roaming\n", stderr: "" };
       },
       readFile: async (filePath) => {
@@ -177,7 +177,7 @@ test("CODEX_TASKBOARD_WSL_RUNTIME_FILE overrides WSL automatic discovery", async
         child.stderr = new PassThrough();
         queueMicrotask(() => {
           child.stdout.end(JSON.stringify({ projects: [] }));
-          child.stderr.end("__CODEX_TASKBOARD_CURL_RESPONSE__200\tapplication/json\t15");
+          child.stderr.end("__AUTOMATE_TASKBOARD_CURL_RESPONSE__200\tapplication/json\t15");
           child.emit("close", 0);
         });
         return child;
@@ -737,7 +737,7 @@ test("attachment upload posts file bytes to a task with filename headers", async
   assert.equal(result.stdout.attachment.id, "att-1");
   assert.equal(result.stdout.target.type, "task");
   assert.equal(result.stdout.target.id, "TASK-1");
-  assert.equal(calls[0].url, "http://127.0.0.1:47823/api/tasks/TASK-1/attachments");
+  assert.equal(calls[0].url, "http://127.0.0.1:47833/api/tasks/TASK-1/attachments");
   assert.equal(calls[0].init.method, "POST");
   assert.equal(calls[0].init.headers["content-type"], "text/markdown");
   assert.equal(calls[0].init.headers["x-taskboard-filename"], encodeURIComponent("notes.md"));
@@ -781,6 +781,6 @@ test("attachment upload requires exactly one target and can target comments", as
     { readFile: async () => Buffer.from([1]) },
   );
   assert.equal(commentResult.exitCode, 0);
-  assert.equal(commentUrl, "http://127.0.0.1:47823/api/comments/COMMENT-1/attachments");
+  assert.equal(commentUrl, "http://127.0.0.1:47833/api/comments/COMMENT-1/attachments");
   assert.equal(commentResult.stdout.target.type, "comment");
 });

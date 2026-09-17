@@ -19,7 +19,7 @@ import { InlineMediaComposer, type InlineMediaComposerHandle } from "./InlineMed
 import { LinearIcon } from "./LinearIcon";
 import "./ProjectReadmeView.css";
 
-type ProjectReadmeError = string | readonly [string, string];
+type ProjectReadmeError = string | readonly [string, string, string?];
 
 interface ProjectReadmeViewProps {
   project: Project;

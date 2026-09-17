@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -10,22 +9,13 @@ import { test } from "node:test";
 
 import { createServer } from "vite";
 
+import { findChromeExecutable } from "./helpers/chrome.mjs";
+
 const execFileAsync = promisify(execFile);
 const projectRoot = fileURLToPath(new URL("..", import.meta.url));
 
-function chromeExecutable() {
-  const candidates = [
-    process.env.CHROME_BIN,
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    "/usr/bin/google-chrome",
-    "/usr/bin/chromium",
-    "/usr/bin/chromium-browser",
-  ];
-  return candidates.find((candidate) => candidate && existsSync(candidate));
-}
-
 test("a new status entry overrides the old draft status and restores the remaining draft", async (t) => {
-  const chrome = chromeExecutable();
+  const chrome = findChromeExecutable();
   if (!chrome) {
     t.skip("Chrome or Chromium is not installed");
     return;

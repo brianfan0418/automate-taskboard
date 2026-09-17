@@ -29,6 +29,36 @@ async function waitFor(predicate, timeout = 4_000) {
   throw new Error("Timed out waiting for condition");
 }
 
+// W9: waits for a chat run to leave "running". Wakes on the service's own `ai.run` event (plus a slow poll in case
+// the event fired before subscribing), with a generous deadline: under full-suite load each fake `codex exec`
+// is a real node process whose spawn alone can take seconds, which overran the 4 s polling default.
+async function waitForRunSettled(service, threadId, runId, timeout = 60_000) {
+  const settled = () => {
+    const status = service.getRun(runId)?.status;
+    return status !== undefined && status !== "running";
+  };
+  if (settled()) return;
+  await new Promise((resolve, reject) => {
+    let unsubscribe = () => {};
+    let done = false;
+    const finish = (error) => {
+      if (done) return;
+      done = true;
+      clearTimeout(deadline);
+      clearInterval(poll);
+      unsubscribe();
+      if (error) reject(error);
+      else resolve();
+    };
+    const deadline = setTimeout(() => finish(new Error(`Timed out waiting for run ${runId} to settle`)), timeout);
+    const poll = setInterval(() => { if (settled()) finish(); }, 100);
+    unsubscribe = service.subscribe(threadId, (event) => {
+      if (event?.type === "ai.run" && event.run?.id === runId && settled()) finish();
+    });
+    if (settled()) finish();
+  });
+}
+
 async function createComposerCatalogFixture(issueSlashCommands) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "taskboard-composer-catalog-"));
   const agentsDirectory = path.join(directory, "agents");
@@ -67,7 +97,7 @@ async function createComposerCatalogFixture(issueSlashCommands) {
     setSkillsError(value) { skillsError = value; },
     async close() {
       catalog.close();
-      await rm(directory, { recursive: true, force: true });
+      await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     },
   };
 }
@@ -633,7 +663,7 @@ process.stdin.on("data", (chunk) => {
     );
   } finally {
     await app.close();
-    await rm(directory, { recursive: true, force: true });
+    await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -829,7 +859,7 @@ if (args[0] === "app-server") {
     database,
     codexExecutable: executable,
     codexStatePath,
-    manageTaskboardSkillPath: "/fixture/manage-taskboard/SKILL.md",
+    manageTaskboardSkillPath: "/fixture/manage-automate-taskboard/SKILL.md",
     processEnv: {
       ...process.env,
       FAKE_CAPTURE_PATH: capturePath,
@@ -837,7 +867,7 @@ if (args[0] === "app-server") {
       FAKE_ENVIRONMENT_CAPTURE_PATH: environmentCapturePath,
       CODEX_TASKBOARD_INSTANCE_TOKEN: "must-not-reach-codex",
       CODEX_TASKBOARD_INSTANCE_SECRET: "must-not-reach-codex",
-      CODEX_TASKBOARD_PORT: "47823",
+      CODEX_TASKBOARD_PORT: "47833",
       CODEX_TASKBOARD_VERSION: "0.2.0",
     },
     killGraceMs: 50,
@@ -856,7 +886,7 @@ if (args[0] === "app-server") {
     async close() {
       await this.service.close();
       this.database.close();
-      await rm(directory, { recursive: true, force: true });
+      await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     },
   };
 }
@@ -893,9 +923,9 @@ test("Codex turns use stdin, explicit resume ids, server-owned cwd and sanitized
       message: "HIDDEN_SENTINEL \uFFFC first",
       skillIds: ["real-skill"],
     });
-    await waitFor(() => fixture.service.getRun(first.id)?.status !== "running");
+    await waitForRunSettled(fixture.service, thread.id, first.id);
     const second = await fixture.service.startTurn(thread.id, { message: "second" });
-    await waitFor(() => fixture.service.getRun(second.id)?.status !== "running");
+    await waitForRunSettled(fixture.service, thread.id, second.id);
 
     const captures = (await readFile(fixture.capturePath, "utf8")).trim().split("\n").map(JSON.parse);
     const environmentCaptures = (
@@ -915,7 +945,7 @@ test("Codex turns use stdin, explicit resume ids, server-owned cwd and sanitized
       "-",
     ]);
     assert.equal(captures[0].args.join(" ").includes("HIDDEN_SENTINEL"), false);
-    assert.match(captures[0].prompt, /\[\$manage-taskboard\]\(\/fixture\/manage-taskboard\/SKILL\.md\) e-taskboard/);
+    assert.match(captures[0].prompt, /\[\$manage-automate-taskboard\]\(\/fixture\/manage-automate-taskboard\/SKILL\.md\) e-taskboard/);
     assert.match(
       captures[0].prompt,
       /HIDDEN_SENTINEL \[\$real-skill\]\(\/fixture\/real-skill\/SKILL\.md\) first/,
@@ -1153,7 +1183,7 @@ test("startup marks abandoned runs interrupted while preserving the Codex thread
     database: fixture.database,
     codexExecutable: path.join(fixture.directory, "fake-codex.mjs"),
     codexStatePath: path.join(fixture.directory, "codex-state.json"),
-    manageTaskboardSkillPath: "/fixture/manage-taskboard/SKILL.md",
+    manageTaskboardSkillPath: "/fixture/manage-automate-taskboard/SKILL.md",
   });
   fixture.service = restarted;
   try {

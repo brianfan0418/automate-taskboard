@@ -3,16 +3,16 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { createReadStream, createWriteStream } from "node:fs";
-import { chmod, mkdir, readFile, rename, stat, unlink, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import { createInterface } from "node:readline";
-import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
+import "../shared/automate-env-init.mjs";
 import { resolvePort } from "../server/app.mjs";
 import { resolveCodexExecutable } from "../shared/codex-executable.mjs";
+import { defaultCodexAppBinRoot, prepareCodexRuntime } from "../shared/codex-runtime-cache.mjs";
 import { withoutTaskboardLauncherEnvironment } from "../shared/codex-environment.mjs";
 import {
   parseTaskboardAutomationHostRequest,
@@ -31,6 +31,7 @@ import {
   CdpPipeBrowser,
   validatedLoopbackCdpWebSocketUrl,
 } from "./codex-cdp-pipe.mjs";
+import { isForeignProfileCodex } from "./codex-profile-ownership.mjs";
 import {
   activateWindowsCodex,
   stopWindowsCodex,
@@ -41,16 +42,19 @@ import {
 
 const injectorPath = fileURLToPath(import.meta.url);
 const projectRoot = path.resolve(path.dirname(injectorPath), "..");
-const defaultCodexDebuggingPort = 9229;
+const defaultCodexDebuggingPort = 9239;
 const independentCodexProfilePath = process.env.CODEX_TASKBOARD_CODEX_PROFILE
   ? path.resolve(process.env.CODEX_TASKBOARD_CODEX_PROFILE)
   : process.platform === "linux"
-    ? path.join(os.tmpdir(), "codex-taskboard-independent-profile-v2")
-    : "/private/tmp/codex-taskboard-independent-profile-v2";
+    ? path.join(os.tmpdir(), "automate-taskboard-independent-profile-v2")
+    : "/private/tmp/automate-taskboard-independent-profile-v2";
+// A desktop launcher passes its own Codex profile; then Codex processes that run another profile
+// (for example Dashi "Codex Taskboard"'s managed Codex) are never reused or injected into.
+const launcherOwnsCodexProfile = Boolean(process.env.CODEX_TASKBOARD_CODEX_PROFILE);
 const sourceCodexProfilePath = process.env.CODEX_TASKBOARD_CODEX_SOURCE_PROFILE
   ? path.resolve(process.env.CODEX_TASKBOARD_CODEX_SOURCE_PROFILE)
   : null;
-const injectionPath = path.join(projectRoot, "inject", "codex-taskboard.user.js");
+const injectionPath = path.join(projectRoot, "inject", "automate-taskboard.user.js");
 const taskboardDataDirectory = process.env.CODEX_TASKBOARD_DATA_DIR
   ? path.resolve(process.env.CODEX_TASKBOARD_DATA_DIR)
   : path.join(projectRoot, ".data");
@@ -85,15 +89,15 @@ const taskboardOrigin = `http://127.0.0.1:${resolvePort()}`;
 const taskboardHealthUrl = `${taskboardOrigin}/health`;
 const taskboardBaseUrl = `${taskboardOrigin}/${encodeURIComponent(taskboardInstanceToken)}`;
 const taskboardPageUrl = `${taskboardBaseUrl}/?host=codex`;
-const hostBindingName = "__codexTaskboardHostV1";
-const hostRequestMessage = "__codexTaskboardHostRequestV1";
-const hostResponseMessage = "__codexTaskboardHostResponseV1";
-const hostHeartbeatMessage = "__codexTaskboardHostHeartbeatV1";
-const hostStartupTokenName = "__codexTaskboardHostStartupTokenV1";
-const codexNotificationBindingName = "__codexTaskboardCodexNotificationV1";
+const hostBindingName = "__automateTaskboardHostV1";
+const hostRequestMessage = "__automateTaskboardHostRequestV1";
+const hostResponseMessage = "__automateTaskboardHostResponseV1";
+const hostHeartbeatMessage = "__automateTaskboardHostHeartbeatV1";
+const hostStartupTokenName = "__automateTaskboardHostStartupTokenV1";
+const codexNotificationBindingName = "__automateTaskboardCodexNotificationV1";
 const hostCapability = randomUUID();
-const injectionSourceHashName = "__CODEX_TASKBOARD_SOURCE_HASH__";
-const injectionScriptIdentifierName = "__CODEX_TASKBOARD_SCRIPT_IDENTIFIER__";
+const injectionSourceHashName = "__AUTOMATE_TASKBOARD_SOURCE_HASH__";
+const injectionScriptIdentifierName = "__AUTOMATE_TASKBOARD_SCRIPT_IDENTIFIER__";
 const codexAutomationMethods = new Set([
   "list-automations",
   "automation-create",
@@ -121,6 +125,9 @@ function stableCodexUserId(account) {
     ? account.account.email.trim().toLowerCase()
     : "";
   if (!email) return "";
+  // Intentionally NOT renamed: this salt derives the person's actor id stored on issues/comments.
+  // It identifies the Codex user, not the product, so the same person keeps one id across
+  // existing boards, cloud collaboration, and a side-by-side Dashi "Codex Taskboard" install.
   const digest = createHash("sha256")
     .update("codex-taskboard-user\0")
     .update(email)
@@ -134,6 +141,7 @@ function parseArgs(argv) {
     portExplicit: false,
     cdpPipe: false,
     launch: false,
+    launchOnRequest: false,
     watch: false,
     open: false,
     refresh: false,
@@ -148,6 +156,7 @@ function parseArgs(argv) {
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--launch") options.launch = true;
+    else if (arg === "--launch-on-request") options.launchOnRequest = true;
     else if (arg === "--cdp-pipe") options.cdpPipe = true;
     else if (arg === "--watch") options.watch = true;
     else if (arg === "--open") options.open = true;
@@ -178,6 +187,9 @@ function parseArgs(argv) {
   if (options.cdpPipe && !options.launch) {
     throw new Error("--cdp-pipe requires --launch");
   }
+  if (options.launchOnRequest && !options.launch) {
+    throw new Error("--launch-on-request requires --launch");
+  }
   return options;
 }
 
@@ -200,7 +212,7 @@ async function isTaskboardReachable() {
   const challenge = randomBytes(32).toString("hex");
   try {
     const response = await fetch(taskboardHealthUrl, {
-      headers: { "x-codex-taskboard-challenge": challenge },
+      headers: { "x-automate-taskboard-challenge": challenge },
       signal: AbortSignal.timeout(1_500),
     });
     if (!response.ok) return false;
@@ -209,7 +221,7 @@ async function isTaskboardReachable() {
       .update(challenge)
       .digest("hex");
     return body?.status === "ok"
-      && body.product === "codex-taskboard"
+      && body.product === "automate-taskboard"
       && body.version === taskboardVersion
       && body.proof === proof;
   } catch {
@@ -248,6 +260,7 @@ function startTaskboard({ detached, onCodexAppServerRequest }) {
     cwd: projectRoot,
     detached,
     stdio: [...baseStdio, "ipc"],
+    windowsHide: true,
   });
   child.on("message", (message) => {
     if (message?.type !== "taskboard:codex-app-server-request") return;
@@ -305,7 +318,7 @@ async function importCodexBrowserProfile() {
   if (!sourceCodexProfilePath || sourceCodexProfilePath === independentCodexProfilePath) return;
   const markerPath = path.join(
     independentCodexProfilePath,
-    ".codex-taskboard-browser-profile-imported-v1",
+    ".automate-taskboard-browser-profile-imported-v1",
   );
   try {
     await stat(markerPath);
@@ -849,6 +862,7 @@ function startResidentInjector(
     cwd: projectRoot,
     detached: true,
     stdio: "ignore",
+    windowsHide: true,
   });
   child.unref();
   return { pid: child.pid, started: true };
@@ -881,8 +895,8 @@ async function waitForResidentInjectorReady(port, pid, startupToken, expectedSou
           const readiness = await cdp.send("Runtime.evaluate", {
             expression: `({
               token: window[${JSON.stringify(hostStartupTokenName)}],
-              taskboardEntryMounted: Boolean(document.getElementById("codex-taskboard-entry")),
-              sourceHash: window.__codexTaskboardInjection__?.sourceHash || null
+              taskboardEntryMounted: Boolean(document.getElementById("automate-taskboard-entry")),
+              sourceHash: window.__automateTaskboardInjection__?.sourceHash || null
             })`,
             returnByValue: true,
           });
@@ -927,14 +941,14 @@ async function refreshTaskboardFrames(port) {
       await cdp.send("Runtime.enable");
       const evaluation = await cdp.send("Runtime.evaluate", {
         expression: `(() => {
-          const taskboard = window.__codexTaskboardInjection__;
+          const taskboard = window.__automateTaskboardInjection__;
           if (typeof taskboard?.reloadFrame === "function") {
             return { refreshed: taskboard.reloadFrame(), via: "injection" };
           }
-          const frame = document.getElementById("codex-taskboard-frame");
+          const frame = document.getElementById("automate-taskboard-frame");
           if (!frame) return { refreshed: false, via: "not-mounted" };
           const url = new URL(frame.getAttribute("src") || frame.src);
-          url.searchParams.set("__codex_taskboard_refresh", Date.now().toString(36));
+          url.searchParams.set("__automate_taskboard_refresh", Date.now().toString(36));
           frame.setAttribute("src", url.href);
           return { refreshed: true, via: "fallback", frameUrl: url.href };
         })()`,
@@ -997,11 +1011,11 @@ async function verifiedTaskboardDocument(frameCapability) {
     cache: "no-store",
     headers: {
       origin: "app://-",
-      "x-codex-taskboard-challenge": challenge,
+      "x-automate-taskboard-challenge": challenge,
     },
   });
   if (!response.ok) throw new Error(`Taskboard HTTP ${response.status}`);
-  const proof = response.headers.get("x-codex-taskboard-proof") ?? "";
+  const proof = response.headers.get("x-automate-taskboard-proof") ?? "";
   const expectedProof = createHmac("sha256", taskboardInstanceSecret)
     .update(challenge)
     .digest("hex");
@@ -1011,7 +1025,7 @@ async function verifiedTaskboardDocument(frameCapability) {
   if (!html.includes(head)) throw new Error("Taskboard document has no head element");
   return html.replace(
     head,
-    `${head}<base href=${JSON.stringify(taskboardPageUrl)}><script>globalThis.__CODEX_TASKBOARD_FRAME_CAPABILITY__=${JSON.stringify(frameCapability)};</script>`,
+    `${head}<base href=${JSON.stringify(taskboardPageUrl)}><script>globalThis.__AUTOMATE_TASKBOARD_FRAME_CAPABILITY__=${JSON.stringify(frameCapability)};</script>`,
   );
 }
 
@@ -1116,7 +1130,7 @@ async function requestCodexAutomationViaCdp(cdp, executionContextId, method, par
       const requestId = ${JSON.stringify(requestId)};
       const bridge = window.electronBridge;
       if (!bridge || typeof bridge.sendMessageFromView !== "function") {
-        resolve({ ok: false, error: "当前 Codex 版本没有提供原生自动任务能力" });
+        resolve({ ok: false, error: "目前 Codex 版本沒有提供原生自動任務能力" });
         return;
       }
       let settled = false;
@@ -1143,7 +1157,7 @@ async function requestCodexAutomationViaCdp(cdp, executionContextId, method, par
         });
       };
       const timeout = window.setTimeout(
-        () => finish({ ok: false, error: "Codex 自动任务接口没有响应" }),
+        () => finish({ ok: false, error: "Codex 自動任務介面沒有回應" }),
         10_000,
       );
       window.addEventListener("message", onMessage);
@@ -1371,7 +1385,7 @@ function remoteAutomationPrompt(task, comments, attachments, target) {
     ? comments.map((comment) => (
       `- ${comment.authorName} (${comment.createdAt}):\n${comment.body}`
     )).join("\n\n")
-    : "（无）";
+    : "（無）";
   const attachmentItems = [
     ...attachments,
     ...comments.flatMap((comment) => comment.attachments ?? []),
@@ -1380,26 +1394,26 @@ function remoteAutomationPrompt(task, comments, attachments, target) {
     ? attachmentItems.map((attachment) => (
       `- ${attachment.filename} (${attachment.contentType}, ${attachment.size} bytes)`
     )).join("\n")
-    : "（无）";
+    : "（無）";
   const developmentContext = task.developmentContext
     ? JSON.stringify(task.developmentContext)
-    : "（项目根目录）";
+    : "（專案根目錄）";
   return [
-    `处理 Taskboard 议题 ${task.identifier}：${task.title}`,
+    `處理 Taskboard 任務 ${task.identifier}：${task.title}`,
     "",
-    `远程工作目录：${target.workspacePath}`,
-    `开发上下文：${developmentContext}`,
+    `遠端工作目錄：${target.workspacePath}`,
+    `開發上下文：${developmentContext}`,
     "",
     "完整描述：",
-    task.description || "（无）",
+    task.description || "（無）",
     "",
-    "全部评论：",
+    "全部留言：",
     commentText,
     "",
     "附件：",
     attachmentText,
     "",
-    "你只负责在当前远程项目和工作目录内完成实现与直接验证。不要运行 taskctl，也不要访问或修改 Taskboard。完成后返回改动、验证结果、执行结果和剩余限制。",
+    "你只負責在目前遠端專案和工作目錄內完成實作與直接驗證。不要執行 taskctl，也不要存取或修改 Taskboard。完成後傳回改動、驗證結果、執行結果和剩餘限制。",
   ].join("\n");
 }
 
@@ -1478,7 +1492,7 @@ async function remoteAutomationCanStart(cdp, request, task, comments) {
   );
   const threadId = started?.thread?.id;
   if (typeof threadId !== "string" || !threadId || started.thread.ephemeral !== true) {
-    throw new Error("Codex 未创建临时自动认领判断线程");
+    throw new Error("Codex 未建立臨時自動認領判斷執行緒");
   }
 
   const deadline = Date.now() + remoteAutomationTurnTimeoutMs;
@@ -1495,8 +1509,8 @@ async function remoteAutomationCanStart(cdp, request, task, comments) {
         input: [{
           type: "text",
           text: [
-            "你是 Codex Taskboard 自动认领 Agent。只判断下面的议题当前是否允许开始。",
-            "根据完整描述和最新评论做语义判断：若任一处明确要求等待、暂不执行或当前不应开始，decision 为 wait；否则 decision 为 start。不要调用工具，不要解释。",
+            "你是 AutoMate Taskboard 自動認領 Agent。只判斷下面的任務目前是否允許開始。",
+            "根據完整描述和最新留言做語意判斷：若任一處明確要求等待、暫不執行或目前不應開始，decision 為 wait；否則 decision 為 start。不要呼叫工具，不要解釋。",
             JSON.stringify({
               identifier: task.identifier,
               title: task.title,
@@ -1529,15 +1543,15 @@ async function remoteAutomationCanStart(cdp, request, task, comments) {
   const turnId = turnStarted?.turn?.id;
   if (typeof turnId !== "string" || !turnId) {
     completion.cancel();
-    throw new Error("Codex 未返回自动认领判断 turn");
+    throw new Error("Codex 未傳回自動認領判斷 turn");
   }
   const turn = await completion.wait(
     turnId,
-    "Codex 自动认领判断超时",
+    "Codex 自動認領判斷超時",
     Math.max(0, deadline - Date.now()),
   );
   if (turn.status !== "completed") {
-    throw new Error(turn.error?.message || "Codex 自动认领判断失败");
+    throw new Error(turn.error?.message || "Codex 自動認領判斷失敗");
   }
   const answer = remoteAutomationTurnText(turn);
   let decision;
@@ -1545,7 +1559,7 @@ async function remoteAutomationCanStart(cdp, request, task, comments) {
     decision = JSON.parse(answer).decision;
   } catch {}
   if (decision !== "start" && decision !== "wait") {
-    throw new Error("Codex 未返回有效的自动认领判断");
+    throw new Error("Codex 未傳回有效的自動認領判斷");
   }
   return decision === "start";
 }
@@ -1587,7 +1601,7 @@ async function runRemoteTaskboardAutomation(record) {
   if (!target) {
     await taskboardRequest(commentsPath, {
       method: "POST",
-      body: { body: "自动认领未开始：目标 SSH 工作目录没有唯一的已登记 Codex 项目映射。" },
+      body: { body: "自動認領未開始：目標 SSH 工作目錄沒有唯一的已登記 Codex 專案映射。" },
     });
     return;
   }
@@ -1706,10 +1720,10 @@ async function runRemoteTaskboardAutomation(record) {
       method: "POST",
       body: {
         body: [
-          "自动认领远程执行完成。",
+          "自動認領遠端執行完成。",
           `- Codex host：${target.codexHostId}`,
-          `- 远程目录：${target.workspacePath}`,
-          `- 远程 thread：${threadId}`,
+          `- 遠端目錄：${target.workspacePath}`,
+          `- 遠端 thread：${threadId}`,
           "",
           finalText,
         ].join("\n").slice(0, 100_000),
@@ -1733,7 +1747,7 @@ async function runRemoteTaskboardAutomation(record) {
     await taskboardRequest(commentsPath, {
       method: "POST",
       body: {
-        body: `自动认领远程执行失败：${message}`.slice(0, 100_000),
+        body: `自動認領遠端執行失敗：${message}`.slice(0, 100_000),
         threadId,
         threadBinding,
       },
@@ -2453,7 +2467,7 @@ function installTaskboardHostBinding(
       const { frameTree } = await cdp.send("Page.getFrameTree");
       const isolatedWorld = await cdp.send("Page.createIsolatedWorld", {
         frameId: frameTree.frame.id,
-        worldName: "codex-taskboard-host",
+        worldName: "automate-taskboard-host",
       });
       activeContextId = isolatedWorld.executionContextId;
       await cdp.send("Runtime.addBinding", {
@@ -2468,8 +2482,8 @@ function installTaskboardHostBinding(
         contextId: activeContextId,
         expression: `(() => {
           const capability = ${JSON.stringify(hostCapability)};
-          if (globalThis.__codexTaskboardIsolatedBridgeV1 === capability) return;
-          globalThis.__codexTaskboardIsolatedBridgeV1 = capability;
+          if (globalThis.__automateTaskboardIsolatedBridgeV1 === capability) return;
+          globalThis.__automateTaskboardIsolatedBridgeV1 = capability;
           window.addEventListener("message", (event) => {
             const message = event.data;
             if (
@@ -2545,14 +2559,14 @@ function installTaskboardHostBinding(
 async function readInjectionStatus(cdp) {
   const status = await cdp.send("Runtime.evaluate", {
     expression: `({
-      version: window.__codexTaskboardInjection__?.version || null,
-      sourceHash: window.__codexTaskboardInjection__?.sourceHash || null,
+      version: window.__automateTaskboardInjection__?.version || null,
+      sourceHash: window.__automateTaskboardInjection__?.sourceHash || null,
       scriptIdentifier: window[${JSON.stringify(injectionScriptIdentifierName)}] || null,
-      entryMounted: Boolean(document.getElementById("codex-taskboard-entry")),
-      pageMounted: Boolean(document.getElementById("codex-taskboard-page")),
-      pageVisible: document.getElementById("codex-taskboard-page")?.hidden === false,
-      frameReady: window.__codexTaskboardInjection__?.ready === true,
-      frameUrl: document.getElementById("codex-taskboard-frame")?.src || null
+      entryMounted: Boolean(document.getElementById("automate-taskboard-entry")),
+      pageMounted: Boolean(document.getElementById("automate-taskboard-page")),
+      pageVisible: document.getElementById("automate-taskboard-page")?.hidden === false,
+      frameReady: window.__automateTaskboardInjection__?.ready === true,
+      frameUrl: document.getElementById("automate-taskboard-frame")?.src || null
     })`,
     returnByValue: true,
   });
@@ -2598,7 +2612,7 @@ async function publishInjectionScriptIdentifier(cdp, scriptIdentifier) {
 
 async function registerInjectionSource(cdp, source) {
   const registration = await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
-    source: `${source}\n//# sourceURL=codex-taskboard.user.js`,
+    source: `${source}\n//# sourceURL=automate-taskboard.user.js`,
   });
   return registration.identifier;
 }
@@ -2649,7 +2663,7 @@ async function injectTarget(
         evaluateCurrentSource: (currentSource) => evaluateInjectionSource(cdp, currentSource),
         publishRegistration: (identifier) => publishInjectionScriptIdentifier(cdp, identifier),
         reopen: () => cdp.send("Runtime.evaluate", {
-          expression: "window.__codexTaskboardInjection__?.open()",
+          expression: "window.__automateTaskboardInjection__?.open()",
           returnByValue: true,
         }),
       });
@@ -2661,7 +2675,7 @@ async function injectTarget(
       await hostBridge.publishHeartbeat();
       if (shouldOpen && !reconciled.shouldRemainOpen) {
         await cdp.send("Runtime.evaluate", {
-          expression: "window.__codexTaskboardInjection__?.open()",
+          expression: "window.__automateTaskboardInjection__?.open()",
           returnByValue: true,
         });
       }
@@ -2697,7 +2711,7 @@ async function injectTarget(
       await waitForInjectionStatus(cdp, false, sourceHash, 60_000);
       await cdp.send("Runtime.evaluate", {
         expression: `(() => {
-          const taskboard = window.__codexTaskboardInjection__;
+          const taskboard = window.__automateTaskboardInjection__;
           taskboard?.close();
           taskboard?.open();
         })()`,
@@ -2790,9 +2804,9 @@ async function injectAll(
 
 async function currentInjectionSource() {
   const userScript = await readFile(injectionPath, "utf8");
-  const runtimeSource = `window.__CODEX_TASKBOARD_MANAGED_ORIGIN__ = ${JSON.stringify(taskboardOrigin)};
-window.__CODEX_TASKBOARD_HOST_CAPABILITY__ = ${JSON.stringify(hostCapability)};
-window.__CODEX_TASKBOARD_URL__ = ${JSON.stringify(taskboardPageUrl)};
+  const runtimeSource = `window.__AUTOMATE_TASKBOARD_MANAGED_ORIGIN__ = ${JSON.stringify(taskboardOrigin)};
+window.__AUTOMATE_TASKBOARD_HOST_CAPABILITY__ = ${JSON.stringify(hostCapability)};
+window.__AUTOMATE_TASKBOARD_URL__ = ${JSON.stringify(taskboardPageUrl)};
 ${userScript}`;
   const sourceHash = createHash("sha256").update(runtimeSource).digest("hex");
   return {
@@ -2808,20 +2822,15 @@ async function resolveRunnableCodexExecutable(appPath) {
     return executable;
   }
 
-  const source = await stat(executable);
-  const cacheDirectory = path.join(taskboardDataDirectory, "codex-runtime");
-  const cachedExecutable = path.join(cacheDirectory, "codex.exe");
-  try {
-    const cached = await stat(cachedExecutable);
-    if (cached.size === source.size && cached.mtimeMs === source.mtimeMs) {
-      return cachedExecutable;
-    }
-  } catch {}
-
-  await mkdir(cacheDirectory, { recursive: true });
-  await pipeline(createReadStream(executable), createWriteStream(cachedExecutable));
-  await utimes(cachedExecutable, source.atime, source.mtime);
-  return cachedExecutable;
+  const runtime = await prepareCodexRuntime({
+    executable,
+    cacheDirectory: path.join(taskboardDataDirectory, "codex-runtime"),
+    codexAppBinRoot: defaultCodexAppBinRoot(),
+  });
+  if (runtime.copied.length > 0 || runtime.source !== "cache") {
+    console.log(JSON.stringify({ codexRuntime: runtime }));
+  }
+  return runtime.executable;
 }
 
 function emitLauncherEvent(event) {
@@ -2932,7 +2941,7 @@ async function main() {
       }
       const evaluation = await connection.send("Runtime.evaluate", {
         expression: `(() => {
-          const taskboard = window.__codexTaskboardInjection__;
+          const taskboard = window.__automateTaskboardInjection__;
           if (typeof taskboard?.open !== "function") return false;
           taskboard.open();
           return true;
@@ -3059,10 +3068,15 @@ async function main() {
     }
   };
 
-  const startManagedCodex = async () => {
+  // Amendment 14: `allowLaunch === false` only attaches to a Codex that already runs with a
+  // reachable CDP renderer; it never starts (or restarts) the Codex App.
+  const startManagedCodex = async (allowLaunch = true) => {
     if (stopping) return false;
     if (!options.cdpPipe) {
-      const runningCodex = codexAppProcesses(options.appPath);
+      const runningCodex = codexAppProcesses(options.appPath).filter((record) => (
+        !launcherOwnsCodexProfile
+        || !isForeignProfileCodex(record.command, independentCodexProfilePath)
+      ));
       let debuggingCodexFound = false;
       for (const record of runningCodex) {
         const port = codexProcessDebuggingPort(record);
@@ -3086,6 +3100,7 @@ async function main() {
         return false;
       }
     }
+    if (!allowLaunch) return false;
     if (options.launch) {
       await importCodexBrowserProfile();
       if (stopping) return false;
@@ -3273,7 +3288,9 @@ async function main() {
     if (options.cdpPipe || !cdpReachable) {
       const launchRequestGeneration = openRequestGeneration;
       try {
-        idleAfterNormalExit = !(await startManagedCodex()) && !nativeCodexBrowser;
+        // Amendment 14: with --launch-on-request the launcher start never opens Codex by itself.
+        const allowLaunch = !options.launchOnRequest || hasOpenPending();
+        idleAfterNormalExit = !(await startManagedCodex(allowLaunch)) && !nativeCodexBrowser;
       } catch (error) {
         if (!options.watch || error?.managedCodexSpawnFailure !== true) throw error;
         openedRequestGeneration = Math.max(
@@ -3345,6 +3362,8 @@ async function main() {
       }
       console.log(JSON.stringify({ injected: firstResults }, null, 2));
       emitLauncherEvent("injected");
+    } else if (options.launchOnRequest && (idleAfterNormalExit || nativeCodexBrowser)) {
+      emitLauncherEvent("codexNotAttached");
     }
     if (hasOpenPending()) {
       await requestTaskboardOpen();
@@ -3377,7 +3396,7 @@ async function main() {
           nativeCodexBrowser = false;
           idleAfterNormalExit = true;
           console.error(
-            "Waiting for Codex after exit; open Codex Taskboard again to restart it.",
+            "Waiting for Codex after exit; open AutoMate Taskboard again to restart it.",
           );
           emitLauncherEvent("waitingForCodex");
           continue;
@@ -3459,7 +3478,7 @@ async function main() {
             codexProcess = null;
             idleAfterNormalExit = true;
             console.error(
-              "Waiting for Codex after normal exit; open Codex Taskboard again to restart it.",
+              "Waiting for Codex after normal exit; open AutoMate Taskboard again to restart it.",
             );
             emitLauncherEvent("waitingForCodex");
             continue;
@@ -3495,7 +3514,7 @@ async function main() {
             if (exitCode === 0) {
               idleAfterNormalExit = true;
               console.error(
-                "Waiting for Codex after normal exit; open Codex Taskboard again to restart it.",
+                "Waiting for Codex after normal exit; open AutoMate Taskboard again to restart it.",
               );
               emitLauncherEvent("waitingForCodex");
               continue;
@@ -3523,7 +3542,7 @@ async function main() {
           codexAppPid = null;
           idleAfterNormalExit = true;
           console.error(
-            "Waiting for Codex after exit; open Codex Taskboard again to restart it.",
+            "Waiting for Codex after exit; open AutoMate Taskboard again to restart it.",
           );
           emitLauncherEvent("waitingForCodex");
           continue;

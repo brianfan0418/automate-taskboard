@@ -12,6 +12,7 @@ import {
 import { createPortal } from "react-dom";
 import { labelDisplayName, labelPresentation } from "../labels";
 import {
+  isChineseLanguage,
   taskPriorityLabel,
   taskStatusLabel,
   useTaskboardI18n,
@@ -65,8 +66,10 @@ function LabelGlyph({ label }: { label: string }) {
 
 function joinSummary(values: string[], noun: string, language: TaskboardLanguage): string | null {
   if (!values.length) return null;
-  if (values.length <= 2) return values.join(language === "zh" ? "、" : ", ");
-  return language === "zh" ? `${values.length} 个${noun}` : `${values.length} ${noun}`;
+  if (values.length <= 2) return values.join(isChineseLanguage(language) ? "、" : ", ");
+  return language === "zh-TW"
+    ? `${values.length} 個${noun}`
+    : language === "zh" ? `${values.length} 个${noun}` : `${values.length} ${noun}`;
 }
 
 export function TaskFilterMenu({ tasks, search, labels, filters, onChange }: TaskFilterMenuProps) {
@@ -523,12 +526,12 @@ export function TaskFilterMenu({ tasks, search, labels, filters, onChange }: Tas
         type="button"
         className={`task-filter-trigger${activeCount ? " is-active" : ""}${open ? " is-open" : ""}`}
         aria-label={activeCount
-          ? text(`筛选议题，已启用 ${activeCount} 个条件`, `Filter issues, ${activeCount} active`)
+          ? text(`筛选议题，已启用 ${activeCount} 个条件`, `Filter issues, ${activeCount} active`, `篩選任務，已啟用 ${activeCount} 個條件`)
           : text("筛选议题", "Filter issues")}
         aria-haspopup="menu"
         aria-expanded={open}
         title={activeCount
-          ? text(`已启用 ${activeCount} 个筛选条件 (F)`, `${activeCount} active filters (F)`)
+          ? text(`已启用 ${activeCount} 个筛选条件 (F)`, `${activeCount} active filters (F)`, `已啟用 ${activeCount} 個篩選條件 (F)`)
           : text("筛选议题 (F)", "Filter issues (F)")}
         onClick={() => open ? closeMenu() : openMenu()}
       >

@@ -1,4 +1,4 @@
-import { ApiError } from "../shared/api-fields.mjs";
+import { ApiError, assertAllowedKeys, assertPlainObject } from "../shared/api-fields.mjs";
 import { taskRelationsQuery, taskRelationsFromRows } from "../shared/task-relations.mjs";
 import {
   commentConversationTitle,
@@ -13,7 +13,7 @@ import {
   projectPrefix,
 } from "../shared/task-records.mjs";
 import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { constants as fsConstants, copyFileSync, existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
@@ -22,8 +22,177 @@ import { DEFAULT_LABEL_NAMES, JIRA_PROJECT_ID } from "../shared/domain.mjs";
 const DEFAULT_PROJECT_LABELS_JSON = JSON.stringify(DEFAULT_LABEL_NAMES);
 const TASK_TREE_MAX_NODES = 1_000;
 
+const TASK_RUN_PROVIDERS = new Set(["codex", "claude"]);
+const TASK_RUN_STATUSES = new Set([
+  "starting", "running", "stopping", "finished", "stopped", "failed", "interrupted",
+]);
+const ACTIVE_TASK_RUN_STATUSES = ["starting", "running", "stopping"];
+const TERMINAL_TASK_RUN_STATUSES = new Set(["finished", "stopped", "failed", "interrupted"]);
+const TASK_RUN_PATCH_COLUMNS = {
+  status: "status",
+  claudeShortId: "claude_short_id",
+  claudeSessionId: "claude_session_id",
+  claudeBridgeSessionId: "claude_bridge_session_id",
+  codexThreadId: "codex_thread_id",
+  codexTurnId: "codex_turn_id",
+  resultText: "result_text",
+  error: "error",
+  startedAt: "started_at",
+  endedAt: "ended_at",
+  updatedAt: "updated_at",
+  // CONTRACTS Amendment 6: the permission mode a Claude run started with and where it came from.
+  claudePermissionMode: "claude_permission_mode",
+  claudePermissionSource: "claude_permission_source",
+  // CONTRACTS Amendment 9 (BUG-W8-2): saved before `claude --bg`; the session name carries `r<token>`.
+  claudeLaunchToken: "claude_launch_token",
+};
+const TASK_RUN_LAUNCH_TOKEN_PATTERN = /^[A-Za-z0-9]{4,32}$/;
+// Amendment 6: Claude Code `permissions.defaultMode` values (docs) and the run permission sources.
+const TASK_RUN_CLAUDE_PERMISSION_MODES = new Set([
+  "default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions",
+]);
+const TASK_RUN_CLAUDE_PERMISSION_SOURCES = new Set([
+  "board", "fallback", "managed", "projectLocal", "project", "user",
+]);
+const TASK_FOLLOWUP_MODES = new Set(["queue", "steer"]);
+const TASK_FOLLOWUP_STATUSES = new Set(["pending", "sent", "failed", "canceled"]);
+const TASK_FOLLOWUP_PATCH_COLUMNS = {
+  // W3 smoke bug 1: an undelivered steer is converted to mode queue.
+  mode: "mode",
+  status: "status",
+  error: "error",
+  sentAt: "sent_at",
+  runId: "run_id",
+};
+const PROJECT_ORDER_MODES = new Set(["suggested", "manual"]);
+const PROJECT_AUTOMATION_PATCH_KEYS = new Set([
+  "enabled", "maxParallel", "claudeModel", "codexModel", "codexEffort", "orderMode", "claudePermissionMode",
+]);
+// CONTRACTS Amendment 5 (W4 retest bug C); Amendment 6 adds followClaude and makes it the default.
+const CLAUDE_PERMISSION_MODES = new Set(["followClaude", "acceptEdits", "bypassPermissions"]);
+const DEFAULT_CLAUDE_PERMISSION_MODE = "followClaude";
+const CLAUDE_PERMISSION_MODE_CHECK = "CHECK (claude_permission_mode IN ('followClaude', 'acceptEdits', 'bypassPermissions'))";
+// Columns added to v2 tables after they first shipped; a database missing one is backed up before migrating.
+const V2_ADDED_COLUMNS = [
+  ["project_automation", "claude_permission_mode"],
+  ["task_runs", "claude_permission_mode"],
+  ["task_runs", "claude_permission_source"],
+  ["task_runs", "claude_launch_token"],
+];
+const PROJECT_AUTOMATION_MAX_PARALLEL = 20;
+const V2_TABLE_NAMES = ["task_runs", "task_followups", "project_automation"];
+const MIGRATION_BACKUPS_KEPT = 5;
+const MIGRATION_BACKUP_PATTERN = /^taskboard-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z\.sqlite$/;
+
 function now() {
   return new Date().toISOString();
+}
+
+function isFileDatabase(filename) {
+  return typeof filename === "string"
+    && filename !== ""
+    && filename !== ":memory:"
+    && !filename.startsWith("file:");
+}
+
+function migrationBackupPath(directory, date) {
+  return path.join(directory, `taskboard-${date.toISOString().replace(/[:.]/g, "-")}.sqlite`);
+}
+
+function pruneMigrationBackups(directory) {
+  try {
+    const backups = readdirSync(directory).filter((name) => MIGRATION_BACKUP_PATTERN.test(name)).sort();
+    for (const name of backups.slice(0, Math.max(0, backups.length - MIGRATION_BACKUPS_KEPT))) {
+      const backupPath = path.join(directory, name);
+      rmSync(backupPath, { force: true });
+      rmSync(`${backupPath}-wal`, { force: true });
+      rmSync(`${backupPath}-shm`, { force: true });
+    }
+  } catch {
+    // Pruning is best-effort; a leftover old backup must never block startup.
+  }
+}
+
+function nullableString(value, name, maxLength = 4096) {
+  if (value === null) return null;
+  if (typeof value !== "string") {
+    throw new ApiError(400, "INVALID_FIELD", `'${name}' must be a string or null`);
+  }
+  if (value.length > maxLength) {
+    throw new ApiError(400, "INVALID_FIELD", `'${name}' cannot exceed ${maxLength} characters`);
+  }
+  return value;
+}
+
+function taskRunFromRow(row) {
+  return {
+    id: row.id,
+    taskId: row.task_id,
+    provider: row.provider,
+    status: row.status,
+    claudeShortId: row.claude_short_id,
+    claudeSessionId: row.claude_session_id,
+    claudeBridgeSessionId: row.claude_bridge_session_id,
+    codexThreadId: row.codex_thread_id,
+    codexTurnId: row.codex_turn_id,
+    resultText: row.result_text,
+    error: row.error,
+    startedAt: row.started_at,
+    endedAt: row.ended_at,
+    claudePermissionMode: row.claude_permission_mode ?? null,
+    claudePermissionSource: row.claude_permission_source ?? null,
+    claudeLaunchToken: row.claude_launch_token ?? null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function taskFollowupFromRow(row) {
+  return {
+    id: row.id,
+    taskId: row.task_id,
+    runId: row.run_id,
+    body: row.body,
+    mode: row.mode,
+    status: row.status,
+    error: row.error,
+    createdAt: row.created_at,
+    sentAt: row.sent_at,
+  };
+}
+
+function projectAutomationFromRow(row) {
+  return {
+    projectId: row.project_id,
+    enabled: Number(row.enabled) === 1,
+    maxParallel: Number(row.max_parallel),
+    claudeModel: row.claude_model,
+    codexModel: row.codex_model,
+    codexEffort: row.codex_effort,
+    orderMode: row.order_mode,
+    claudePermissionMode: CLAUDE_PERMISSION_MODES.has(row.claude_permission_mode)
+      ? row.claude_permission_mode
+      : DEFAULT_CLAUDE_PERMISSION_MODE,
+    updatedAt: row.updated_at,
+  };
+}
+
+function defaultProjectAutomation(projectId) {
+  return {
+    projectId,
+    enabled: false,
+    maxParallel: 3,
+    claudeModel: null,
+    codexModel: null,
+    codexEffort: null,
+    orderMode: "suggested",
+    claudePermissionMode: DEFAULT_CLAUDE_PERMISSION_MODE,
+    updatedAt: null,
+  };
+}
+
+function isUniqueConstraintError(error) {
+  return String(error?.message).includes("UNIQUE constraint failed");
 }
 
 function storedThreadBindingForExisting(current, threadBinding, threadId) {
@@ -254,10 +423,110 @@ function aiChatEventFromRow(row) {
 export class TaskboardDatabase {
   constructor(filename) {
     mkdirSync(path.dirname(filename), { recursive: true });
+    const existingFile = isFileDatabase(filename) && existsSync(filename);
     this.database = new DatabaseSync(filename);
     this.database.exec("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;");
-    this.#migrate();
+    const backupPath = existingFile && this.#needsMigrationBackup()
+      ? this.#createMigrationBackup(filename)
+      : null;
+    try {
+      this.#migrate();
+    } catch (error) {
+      if (backupPath === null) throw error;
+      this.#restoreMigrationBackup(filename, backupPath, error);
+    }
     this.interruptAbandonedAiChatRuns();
+  }
+
+  #needsMigrationBackup() {
+    const tables = new Set(this.database.prepare(`
+      SELECT name FROM sqlite_schema WHERE type = 'table'
+    `).all().map((row) => row.name));
+    if (tables.size === 0) return false;
+    if (V2_TABLE_NAMES.some((name) => !tables.has(name))) return true;
+    if (V2_ADDED_COLUMNS.some(([table, column]) => !this.database.prepare(`PRAGMA table_info(${table})`).all()
+      .some((candidate) => candidate.name === column))) return true;
+    // Amendment 6: the claude_permission_mode CHECK must allow followClaude (table rebuild).
+    return !this.#projectAutomationAllowsFollowClaude();
+  }
+
+  #projectAutomationAllowsFollowClaude() {
+    const sql = this.database.prepare(`
+      SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'project_automation'
+    `).get()?.sql ?? "";
+    return sql.includes("'followClaude'");
+  }
+
+  #createMigrationBackup(filename) {
+    let partialPath = null;
+    try {
+      const directory = path.join(path.dirname(filename), "backups");
+      mkdirSync(directory, { recursive: true });
+      let date = new Date();
+      let backupPath = migrationBackupPath(directory, date);
+      while (existsSync(backupPath)) {
+        date = new Date(date.getTime() + 1);
+        backupPath = migrationBackupPath(directory, date);
+      }
+      const checkpoint = this.database.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get();
+      partialPath = backupPath;
+      if (checkpoint && Number(checkpoint.busy) !== 0) {
+        // Another connection kept WAL frames alive; take a consistent snapshot instead of a raw copy.
+        this.database.prepare("VACUUM INTO ?").run(backupPath);
+      } else {
+        copyFileSync(filename, backupPath, fsConstants.COPYFILE_EXCL);
+      }
+      pruneMigrationBackups(directory);
+      return backupPath;
+    } catch (error) {
+      try {
+        this.database.close();
+      } catch {
+        // The connection is being abandoned; the backup failure below is the actionable error.
+      }
+      if (partialPath !== null && error?.code !== "EEXIST") {
+        // The path did not exist before this attempt (checked above), so any file there is a partial copy.
+        try {
+          rmSync(partialPath, { force: true });
+        } catch {
+          // A leftover partial copy is harmless next to the reported failure.
+        }
+      }
+      const failure = new ApiError(
+        500,
+        "DB_MIGRATION_FAILED",
+        `Database backup before migration failed (${error.message}); database was not migrated. backup: none`,
+        { backupPath: null, restored: false, stage: "backup" },
+      );
+      failure.cause = error;
+      throw failure;
+    }
+  }
+
+  #restoreMigrationBackup(filename, backupPath, cause) {
+    try {
+      this.database.close();
+    } catch {
+      // Closing may fail after a broken migration; restoring the file is still required.
+    }
+    let restoreError = null;
+    try {
+      rmSync(`${filename}-wal`, { force: true });
+      rmSync(`${filename}-shm`, { force: true });
+      copyFileSync(backupPath, filename);
+    } catch (error) {
+      restoreError = error;
+    }
+    const message = restoreError
+      ? `Database migration failed (${cause.message}) and restoring the original database failed (${restoreError.message}). backup: ${backupPath}`
+      : `Database migration failed (${cause.message}); the original database was restored. backup: ${backupPath}`;
+    const failure = new ApiError(500, "DB_MIGRATION_FAILED", message, {
+      backupPath,
+      restored: restoreError === null,
+      stage: "migrate",
+    });
+    failure.cause = cause;
+    throw failure;
   }
 
   #migrate() {
@@ -798,6 +1067,77 @@ export class TaskboardDatabase {
       ON CONFLICT(id) DO UPDATE SET value = MAX(value, excluded.value)
     `).run(maxChangeRevision);
 
+    this.database.exec(`
+      CREATE TABLE IF NOT EXISTS task_runs (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude')),
+        status TEXT NOT NULL CHECK (status IN (
+          'starting', 'running', 'stopping', 'finished', 'stopped', 'failed', 'interrupted'
+        )),
+        claude_short_id TEXT,
+        claude_session_id TEXT,
+        claude_bridge_session_id TEXT,
+        codex_thread_id TEXT,
+        codex_turn_id TEXT,
+        result_text TEXT,
+        error TEXT,
+        started_at TEXT,
+        ended_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS task_runs_task
+        ON task_runs(task_id, created_at);
+
+      CREATE UNIQUE INDEX IF NOT EXISTS task_runs_one_active
+        ON task_runs(task_id)
+        WHERE status IN ('starting', 'running', 'stopping');
+
+      CREATE TABLE IF NOT EXISTS task_followups (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        run_id TEXT REFERENCES task_runs(id) ON DELETE SET NULL,
+        body TEXT NOT NULL,
+        mode TEXT NOT NULL CHECK (mode IN ('queue', 'steer')),
+        status TEXT NOT NULL CHECK (status IN ('pending', 'sent', 'failed', 'canceled')),
+        error TEXT,
+        created_at TEXT NOT NULL,
+        sent_at TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS task_followups_task
+        ON task_followups(task_id, created_at);
+
+      CREATE TABLE IF NOT EXISTS project_automation (
+        project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+        enabled INTEGER NOT NULL DEFAULT 0,
+        max_parallel INTEGER NOT NULL DEFAULT 3,
+        claude_model TEXT,
+        codex_model TEXT,
+        codex_effort TEXT,
+        order_mode TEXT NOT NULL DEFAULT 'suggested' CHECK (order_mode IN ('suggested', 'manual')),
+        claude_permission_mode TEXT DEFAULT 'followClaude'
+          ${CLAUDE_PERMISSION_MODE_CHECK},
+        updated_at TEXT NOT NULL
+      );
+    `);
+
+    const projectAutomationColumns = this.database.prepare("PRAGMA table_info(project_automation)").all();
+    if (!projectAutomationColumns.some((column) => column.name === "claude_permission_mode")) {
+      this.database.exec(`
+        ALTER TABLE project_automation ADD COLUMN claude_permission_mode TEXT DEFAULT 'followClaude'
+          ${CLAUDE_PERMISSION_MODE_CHECK}
+      `);
+    }
+    this.#migrateClaudePermissionModeCheck();
+
+    const taskRunColumns = new Set(this.database.prepare("PRAGMA table_info(task_runs)").all().map((column) => column.name));
+    for (const column of ["claude_permission_mode", "claude_permission_source", "claude_launch_token"]) {
+      if (!taskRunColumns.has(column)) this.database.exec(`ALTER TABLE task_runs ADD COLUMN ${column} TEXT`);
+    }
+
     const timestamp = now();
     this.database.prepare(`
       INSERT INTO projects (id, name, workspace_path, next_task_number, created_at, updated_at)
@@ -813,6 +1153,52 @@ export class TaskboardDatabase {
 
   close() {
     this.database.close();
+  }
+
+  // Amendment 6: an Amendment-5 project_automation (CHECK without 'followClaude', default
+  // 'bypassPermissions') is rebuilt; every existing row keeps its stored value.
+  #migrateClaudePermissionModeCheck() {
+    if (this.#projectAutomationAllowsFollowClaude()) return;
+    this.database.exec("PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE");
+    try {
+      this.database.exec(`
+        CREATE TABLE project_automation_permission_migration (
+          project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+          enabled INTEGER NOT NULL DEFAULT 0,
+          max_parallel INTEGER NOT NULL DEFAULT 3,
+          claude_model TEXT,
+          codex_model TEXT,
+          codex_effort TEXT,
+          order_mode TEXT NOT NULL DEFAULT 'suggested' CHECK (order_mode IN ('suggested', 'manual')),
+          claude_permission_mode TEXT DEFAULT 'followClaude'
+            ${CLAUDE_PERMISSION_MODE_CHECK},
+          updated_at TEXT NOT NULL
+        );
+
+        INSERT INTO project_automation_permission_migration (
+          project_id, enabled, max_parallel, claude_model, codex_model, codex_effort, order_mode,
+          claude_permission_mode, updated_at
+        )
+        SELECT
+          project_id, enabled, max_parallel, claude_model, codex_model, codex_effort, order_mode,
+          claude_permission_mode, updated_at
+        FROM project_automation;
+
+        DROP TABLE project_automation;
+        ALTER TABLE project_automation_permission_migration RENAME TO project_automation;
+      `);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    } finally {
+      this.database.exec("PRAGMA foreign_keys = ON");
+    }
+
+    const violation = this.database.prepare("PRAGMA foreign_key_check").get();
+    if (violation) {
+      throw new Error(`Claude permission mode migration produced a foreign key violation in '${violation.table}'`);
+    }
   }
 
   #migrateTaskStatuses() {
@@ -1147,6 +1533,17 @@ export class TaskboardDatabase {
       this.database.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  // W15: set (or clear with null) the folder AI runs use as their working directory.
+  updateProjectWorkspace(id, workspacePath) {
+    const result = this.database.prepare(`
+      UPDATE projects SET workspace_path = ?, updated_at = ? WHERE id = ?
+    `).run(workspacePath, now(), id);
+    if (result.changes === 0) {
+      throw new ApiError(404, "PROJECT_NOT_FOUND", `Project '${id}' does not exist`);
+    }
+    return this.getProject(id);
   }
 
   deleteProject(id) {
@@ -1660,6 +2057,359 @@ export class TaskboardDatabase {
     } catch (error) {
       this.database.exec("ROLLBACK");
       throw error;
+    }
+  }
+
+  createRun({ taskId, provider } = {}) {
+    const task = this.#requireRunTask(taskId);
+    if (!TASK_RUN_PROVIDERS.has(provider)) {
+      throw new ApiError(400, "INVALID_FIELD", "'provider' must be codex or claude");
+    }
+    const id = randomUUID();
+    const timestamp = now();
+    try {
+      this.database.prepare(`
+        INSERT INTO task_runs (
+          id, task_id, provider, status, started_at, created_at, updated_at
+        ) VALUES (?, ?, ?, 'starting', ?, ?, ?)
+      `).run(id, task.id, provider, timestamp, timestamp, timestamp);
+    } catch (error) {
+      if (isUniqueConstraintError(error)) {
+        throw new ApiError(409, "RUN_ALREADY_ACTIVE", `Task '${task.identifier}' already has an active run`);
+      }
+      throw error;
+    }
+    return this.getRun(id);
+  }
+
+  updateRun(id, patch) {
+    const current = this.getRun(id);
+    if (!current) {
+      throw new ApiError(404, "RUN_NOT_FOUND", `Run '${id}' does not exist`);
+    }
+    assertPlainObject(patch);
+    assertAllowedKeys(patch, new Set(Object.keys(TASK_RUN_PATCH_COLUMNS)));
+    const changes = Object.fromEntries(Object.entries(patch).filter(([, value]) => value !== undefined));
+    if (Object.keys(changes).length === 0) return current;
+    if (changes.status !== undefined && !TASK_RUN_STATUSES.has(changes.status)) {
+      throw new ApiError(400, "INVALID_FIELD", `'status' must be one of: ${[...TASK_RUN_STATUSES].join(", ")}`);
+    }
+    for (const key of Object.keys(changes)) {
+      if (key === "status") continue;
+      const maxLength = key === "resultText" || key === "error" ? 1_000_000 : 4096;
+      nullableString(changes[key], key, maxLength);
+    }
+    if (typeof changes.claudePermissionMode === "string" && !TASK_RUN_CLAUDE_PERMISSION_MODES.has(changes.claudePermissionMode)) {
+      throw new ApiError(400, "INVALID_FIELD", `'claudePermissionMode' must be one of: ${[...TASK_RUN_CLAUDE_PERMISSION_MODES].join(", ")}`);
+    }
+    if (typeof changes.claudePermissionSource === "string" && !TASK_RUN_CLAUDE_PERMISSION_SOURCES.has(changes.claudePermissionSource)) {
+      throw new ApiError(400, "INVALID_FIELD", `'claudePermissionSource' must be one of: ${[...TASK_RUN_CLAUDE_PERMISSION_SOURCES].join(", ")}`);
+    }
+    if (typeof changes.claudeLaunchToken === "string" && !TASK_RUN_LAUNCH_TOKEN_PATTERN.test(changes.claudeLaunchToken)) {
+      throw new ApiError(400, "INVALID_FIELD", "'claudeLaunchToken' must be 4-32 letters or digits");
+    }
+    if (changes.updatedAt === null) {
+      throw new ApiError(400, "INVALID_FIELD", "'updatedAt' cannot be null");
+    }
+    if (
+      TERMINAL_TASK_RUN_STATUSES.has(changes.status)
+      && changes.endedAt === undefined
+      && (!TERMINAL_TASK_RUN_STATUSES.has(current.status) || current.endedAt === null)
+    ) {
+      changes.endedAt = now();
+    }
+    if (changes.updatedAt === undefined) changes.updatedAt = now();
+
+    const assignments = [];
+    const values = [];
+    for (const [key, value] of Object.entries(changes)) {
+      assignments.push(`${TASK_RUN_PATCH_COLUMNS[key]} = ?`);
+      values.push(value);
+    }
+    try {
+      this.database.prepare(`
+        UPDATE task_runs SET ${assignments.join(", ")} WHERE id = ?
+      `).run(...values, id);
+    } catch (error) {
+      if (isUniqueConstraintError(error)) {
+        throw new ApiError(409, "RUN_ALREADY_ACTIVE", "This task already has another active run");
+      }
+      throw error;
+    }
+    return this.getRun(id);
+  }
+
+  getRun(id) {
+    if (typeof id !== "string") return null;
+    const row = this.database.prepare("SELECT * FROM task_runs WHERE id = ?").get(id);
+    return row ? taskRunFromRow(row) : null;
+  }
+
+  listRuns(taskId) {
+    return this.database.prepare(`
+      SELECT * FROM task_runs
+      WHERE task_id = ?
+      ORDER BY created_at DESC, rowid DESC
+    `).all(taskId).map(taskRunFromRow);
+  }
+
+  getActiveRun(taskId) {
+    const row = this.database.prepare(`
+      SELECT * FROM task_runs
+      WHERE task_id = ? AND status IN ('starting', 'running', 'stopping')
+      ORDER BY created_at DESC, rowid DESC
+      LIMIT 1
+    `).get(taskId);
+    return row ? taskRunFromRow(row) : null;
+  }
+
+  getLatestRun(taskId) {
+    const row = this.database.prepare(`
+      SELECT * FROM task_runs
+      WHERE task_id = ?
+      ORDER BY created_at DESC, rowid DESC
+      LIMIT 1
+    `).get(taskId);
+    return row ? taskRunFromRow(row) : null;
+  }
+
+  listActiveRuns({ projectId } = {}) {
+    const values = [...ACTIVE_TASK_RUN_STATUSES];
+    let projectFilter = "";
+    if (projectId !== undefined && projectId !== null) {
+      projectFilter = "AND tasks.project_id = ?";
+      values.push(projectId);
+    }
+    return this.database.prepare(`
+      SELECT task_runs.*, tasks.project_id AS project_id
+      FROM task_runs
+      JOIN tasks ON tasks.id = task_runs.task_id
+      WHERE task_runs.status IN (?, ?, ?) ${projectFilter}
+      ORDER BY task_runs.created_at, task_runs.rowid
+    `).all(...values).map((row) => ({ ...taskRunFromRow(row), projectId: row.project_id }));
+  }
+
+  listRunsByStatus(statuses) {
+    if (!Array.isArray(statuses) || statuses.some((status) => !TASK_RUN_STATUSES.has(status))) {
+      throw new ApiError(400, "INVALID_FIELD", `'statuses' must only contain: ${[...TASK_RUN_STATUSES].join(", ")}`);
+    }
+    const unique = [...new Set(statuses)];
+    if (unique.length === 0) return [];
+    return this.database.prepare(`
+      SELECT * FROM task_runs
+      WHERE status IN (${unique.map(() => "?").join(", ")})
+      ORDER BY created_at, rowid
+    `).all(...unique).map(taskRunFromRow);
+  }
+
+  createFollowup({ taskId, runId: requestedRunId, body, mode } = {}) {
+    const task = this.#requireRunTask(taskId);
+    if (!TASK_FOLLOWUP_MODES.has(mode)) {
+      throw new ApiError(400, "INVALID_FIELD", "'mode' must be queue or steer");
+    }
+    if (typeof body !== "string") {
+      throw new ApiError(400, "INVALID_FIELD", "'body' must be a string");
+    }
+    const runId = requestedRunId ?? null;
+    if (runId !== null) {
+      const run = this.getRun(runId);
+      if (!run) {
+        throw new ApiError(404, "RUN_NOT_FOUND", `Run '${runId}' does not exist`);
+      }
+      if (run.taskId !== task.id) {
+        throw new ApiError(400, "INVALID_FIELD", "'runId' must belong to the same task");
+      }
+    }
+    const id = randomUUID();
+    this.database.prepare(`
+      INSERT INTO task_followups (id, task_id, run_id, body, mode, status, error, created_at, sent_at)
+      VALUES (?, ?, ?, ?, ?, 'pending', NULL, ?, NULL)
+    `).run(id, task.id, runId, body, mode, now());
+    return this.getFollowup(id);
+  }
+
+  getFollowup(id) {
+    if (typeof id !== "string") return null;
+    const row = this.database.prepare("SELECT * FROM task_followups WHERE id = ?").get(id);
+    return row ? taskFollowupFromRow(row) : null;
+  }
+
+  // `ifStatus` (Amendment 7, DBG-02): only update while the follow-up still has that status; returns null otherwise.
+  updateFollowup(id, patch, { ifStatus } = {}) {
+    const current = this.getFollowup(id);
+    if (!current) {
+      throw new ApiError(404, "FOLLOWUP_NOT_FOUND", `Follow-up '${id}' does not exist`);
+    }
+    if (ifStatus !== undefined && current.status !== ifStatus) return null;
+    assertPlainObject(patch);
+    assertAllowedKeys(patch, new Set(Object.keys(TASK_FOLLOWUP_PATCH_COLUMNS)));
+    const changes = Object.fromEntries(Object.entries(patch).filter(([, value]) => value !== undefined));
+    if (Object.keys(changes).length === 0) return current;
+    if (changes.status !== undefined && !TASK_FOLLOWUP_STATUSES.has(changes.status)) {
+      throw new ApiError(400, "INVALID_FIELD", `'status' must be one of: ${[...TASK_FOLLOWUP_STATUSES].join(", ")}`);
+    }
+    if (changes.mode !== undefined && !TASK_FOLLOWUP_MODES.has(changes.mode)) {
+      throw new ApiError(400, "INVALID_FIELD", "'mode' must be queue or steer");
+    }
+    if (changes.error !== undefined) nullableString(changes.error, "error", 1_000_000);
+    if (changes.sentAt !== undefined) nullableString(changes.sentAt, "sentAt");
+    if (changes.runId !== undefined && changes.runId !== null) {
+      const run = this.getRun(changes.runId);
+      if (!run) {
+        throw new ApiError(404, "RUN_NOT_FOUND", `Run '${changes.runId}' does not exist`);
+      }
+      if (run.taskId !== current.taskId) {
+        throw new ApiError(400, "INVALID_FIELD", "'runId' must belong to the same task");
+      }
+    }
+    if (changes.status === "sent" && changes.sentAt === undefined && current.sentAt === null) {
+      changes.sentAt = now();
+    }
+    const assignments = [];
+    const values = [];
+    for (const [key, value] of Object.entries(changes)) {
+      assignments.push(`${TASK_FOLLOWUP_PATCH_COLUMNS[key]} = ?`);
+      values.push(value);
+    }
+    if (ifStatus !== undefined) {
+      const result = this.database.prepare(`
+        UPDATE task_followups SET ${assignments.join(", ")} WHERE id = ? AND status = ?
+      `).run(...values, id, ifStatus);
+      if (Number(result.changes) === 0) return null;
+      return this.getFollowup(id);
+    }
+    this.database.prepare(`
+      UPDATE task_followups SET ${assignments.join(", ")} WHERE id = ?
+    `).run(...values, id);
+    return this.getFollowup(id);
+  }
+
+  listFollowups(taskId) {
+    return this.database.prepare(`
+      SELECT * FROM task_followups
+      WHERE task_id = ?
+      ORDER BY created_at, rowid
+    `).all(taskId).map(taskFollowupFromRow);
+  }
+
+  /** W5: pending steers across all tasks (settled by the run service on startup). */
+  listPendingSteerFollowups() {
+    return this.database.prepare(`
+      SELECT * FROM task_followups
+      WHERE status = 'pending' AND mode = 'steer'
+      ORDER BY created_at, rowid
+    `).all().map(taskFollowupFromRow);
+  }
+
+  listPendingFollowups(taskId) {
+    return this.database.prepare(`
+      SELECT * FROM task_followups
+      WHERE task_id = ? AND status = 'pending' AND mode = 'queue'
+      ORDER BY created_at, rowid
+    `).all(taskId).map(taskFollowupFromRow);
+  }
+
+  getProjectAutomation(projectId) {
+    this.#requireProjectExists(projectId);
+    const row = this.database.prepare(`
+      SELECT * FROM project_automation WHERE project_id = ?
+    `).get(projectId);
+    return row ? projectAutomationFromRow(row) : defaultProjectAutomation(projectId);
+  }
+
+  updateProjectAutomation(projectId, patch) {
+    this.#requireProjectExists(projectId);
+    assertPlainObject(patch);
+    assertAllowedKeys(patch, PROJECT_AUTOMATION_PATCH_KEYS);
+    const next = { ...this.getProjectAutomation(projectId) };
+    if (patch.enabled !== undefined) {
+      if (typeof patch.enabled !== "boolean") {
+        throw new ApiError(400, "INVALID_FIELD", "'enabled' must be a boolean");
+      }
+      next.enabled = patch.enabled;
+    }
+    if (patch.maxParallel !== undefined) {
+      if (
+        !Number.isSafeInteger(patch.maxParallel)
+        || patch.maxParallel < 1
+        || patch.maxParallel > PROJECT_AUTOMATION_MAX_PARALLEL
+      ) {
+        throw new ApiError(
+          400,
+          "INVALID_FIELD",
+          `'maxParallel' must be an integer from 1 to ${PROJECT_AUTOMATION_MAX_PARALLEL}`,
+        );
+      }
+      next.maxParallel = patch.maxParallel;
+    }
+    for (const key of ["claudeModel", "codexModel", "codexEffort"]) {
+      if (patch[key] === undefined) continue;
+      const value = nullableString(patch[key], key, 200);
+      next[key] = value === null || value.trim() === "" ? null : value.trim();
+    }
+    if (patch.orderMode !== undefined) {
+      if (!PROJECT_ORDER_MODES.has(patch.orderMode)) {
+        throw new ApiError(400, "INVALID_FIELD", "'orderMode' must be suggested or manual");
+      }
+      next.orderMode = patch.orderMode;
+    }
+    if (patch.claudePermissionMode !== undefined) {
+      if (!CLAUDE_PERMISSION_MODES.has(patch.claudePermissionMode)) {
+        throw new ApiError(400, "INVALID_FIELD", "'claudePermissionMode' must be followClaude, acceptEdits or bypassPermissions");
+      }
+      next.claudePermissionMode = patch.claudePermissionMode;
+    }
+    this.database.prepare(`
+      INSERT INTO project_automation (
+        project_id, enabled, max_parallel, claude_model, codex_model, codex_effort, order_mode,
+        claude_permission_mode, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(project_id) DO UPDATE SET
+        enabled = excluded.enabled,
+        max_parallel = excluded.max_parallel,
+        claude_model = excluded.claude_model,
+        codex_model = excluded.codex_model,
+        codex_effort = excluded.codex_effort,
+        order_mode = excluded.order_mode,
+        claude_permission_mode = excluded.claude_permission_mode,
+        updated_at = excluded.updated_at
+    `).run(
+      projectId,
+      next.enabled ? 1 : 0,
+      next.maxParallel,
+      next.claudeModel,
+      next.codexModel,
+      next.codexEffort,
+      next.orderMode,
+      next.claudePermissionMode,
+      now(),
+    );
+    return this.getProjectAutomation(projectId);
+  }
+
+  listEnabledAutomations() {
+    return this.database.prepare(`
+      SELECT project_automation.*
+      FROM project_automation
+      JOIN projects ON projects.id = project_automation.project_id
+      WHERE project_automation.enabled = 1
+      ORDER BY project_automation.project_id
+    `).all().map(projectAutomationFromRow);
+  }
+
+  #requireRunTask(taskId) {
+    if (typeof taskId !== "string" || taskId === "") {
+      throw new ApiError(404, "TASK_NOT_FOUND", `Task '${taskId}' does not exist`);
+    }
+    return this.#requireTaskRecord(taskId);
+  }
+
+  #requireProjectExists(projectId) {
+    const row = typeof projectId === "string"
+      ? this.database.prepare("SELECT 1 FROM projects WHERE id = ?").get(projectId)
+      : undefined;
+    if (!row) {
+      throw new ApiError(404, "PROJECT_NOT_FOUND", `Project '${projectId}' does not exist`);
     }
   }
 

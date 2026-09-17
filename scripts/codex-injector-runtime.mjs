@@ -1,4 +1,4 @@
-const HOST_REQUEST_ERROR = "自动认领配置暂时无法应用，请刷新后重试";
+const HOST_REQUEST_ERROR = "自動認領設定暫時無法套用，請重新整理後重試";
 const AUTOMATION_SCHEMA_DIAGNOSTIC = "AUTOMATION_SCHEMA_MISMATCH";
 
 function parseHostRequest(payload, parseAutomationRequest) {
@@ -24,7 +24,7 @@ function parseHostRequest(payload, parseAutomationRequest) {
   if (
     request.action === "load-frame"
     && typeof request.frameName === "string"
-    && /^codex-taskboard-[a-f0-9-]{36,80}$/i.test(request.frameName)
+    && /^automate-taskboard-[a-f0-9-]{36,80}$/i.test(request.frameName)
     && typeof request.frameCapability === "string"
     && /^[a-f0-9-]{36,80}$/i.test(request.frameCapability)
   ) return { id, request, error: null };
